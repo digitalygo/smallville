@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% load staticfiles %}
+{% load static %}
 
 {% block content %}
 <br>
@@ -10,7 +10,7 @@
 
   
 <!-- partial -->
-<script src='https://cdn.jsdelivr.net/npm/phaser@3.55.2/dist/phaser.js'></script>
+<script src="{% static 'vendor/phaser-3.55.2/phaser.js' %}"></script>
 {% include 'path_tester/main_script.html' %}
 {% endblock content %}
 

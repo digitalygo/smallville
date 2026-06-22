@@ -1,15 +1,29 @@
-{% load staticfiles %}
+{% load static %}
 
+{% csrf_token %}
 <div id="step" style="display:none">{{step}}</div>
 <div id="sim_code" style="display:none">{{sim_code}}</div>
 <div id="persona_name_list" style="display:none">{{persona_name_str}}</div>
-<div id="persona_init_pos" style="display:none">
-	{% for i in persona_init_pos %}
-		<span>{{i.0}},{{i.1}},{{i.2}}</span>
-	{% endfor %}
-</div>
+{{ persona_init_pos|json_script:"persona-init-pos" }}
 
 <script type="text/javascript">
+	// CSRF token helper for Django POST requests
+	function getCookie(name) {
+		let cookieValue = null;
+		if (document.cookie && document.cookie !== '') {
+			const cookies = document.cookie.split(';');
+			for (let i = 0; i < cookies.length; i++) {
+				const cookie = cookies[i].trim();
+				if (cookie.substring(0, name.length + 1) === (name + '=')) {
+					cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+					break;
+				}
+			}
+		}
+		return cookieValue;
+	}
+	const csrftoken = getCookie('csrftoken');
+
 	/*
 	  Main resources: 
 	  https://www.youtube.com/watch?v=cKIG1lKwLeo&t=401s&ab_channel=HongLy
@@ -29,15 +43,15 @@
 
 	// <step> -- one full loop around all three phases determined by <phase> is 
 	// a step. We use this to link the steps in the backend. 
-	let step = parseInt(document.getElementById('step').innerHTML);
-	let sim_code = document.getElementById('sim_code').innerHTML;
-	// let persona_names = document.getElementById('persona_name_list').innerHTML.split(",");
+	let step = parseInt(document.getElementById('step').textContent);
+	let sim_code = document.getElementById('sim_code').textContent;
+	// let persona_names = document.getElementById('persona_name_list').textContent.split(",");
 
-	let spans = document.getElementById('persona_init_pos').getElementsByTagName('span');
+	let persona_init_pos = JSON.parse(document.getElementById('persona-init-pos').textContent);
 	let persona_names = {};
-	for(var i = 0, l = spans.length; i < l; i++){
-		let x = spans[i].innerText.split(",");
-		persona_names[x[0]] = [parseInt(x[1]), parseInt(x[2])]
+	for (let i = 0, l = persona_init_pos.length; i < l; i++) {
+		let x = persona_init_pos[i];
+		persona_names[x[0]] = [parseInt(x[1]), parseInt(x[2])];
 	}
 
 
@@ -120,7 +134,29 @@
 	let execute_count_max = tile_width/movement_speed;
 	let execute_count = execute_count_max;
 	let movement_target = {};
-	
+
+	function setText(id, text) {
+		let el = document.getElementById(id);
+		if (el) el.textContent = text;
+	}
+
+	function renderChat(elementId, chatRaw) {
+		let el = document.getElementById(elementId);
+		if (!el) return;
+		el.innerHTML = "";
+		if (chatRaw == null) {
+			let em = document.createElement("em");
+			em.textContent = "None at the moment";
+			el.appendChild(em);
+			return;
+		}
+		for (let j = 0; j < chatRaw.length; j++) {
+			let speaker = chatRaw[j][0];
+			let text = chatRaw[j][1];
+			el.appendChild(document.createTextNode(speaker + ": " + text));
+			el.appendChild(document.createElement("br"));
+		}
+	}
 
 	// ###########################################################################
 	// ENGINE
@@ -388,6 +424,7 @@
 	    var retrieve_xobj = new XMLHttpRequest();
 	    retrieve_xobj.overrideMimeType("application/json");
 	    retrieve_xobj.open('POST', "{% url 'process_environment' %}", true);
+	    retrieve_xobj.setRequestHeader('X-CSRFToken', csrftoken);
 	    retrieve_xobj.send(json);   
 	    // Finally, we update the phase variable to start the "udpate" process. 
 	    // Now that we sent all persona locations to the backend server, we need
@@ -409,6 +446,7 @@
 	      var update_xobj = new XMLHttpRequest();
 	      update_xobj.overrideMimeType("application/json");
 	      update_xobj.open('POST', "{% url 'update_environment' %}", true);
+	      update_xobj.setRequestHeader('X-CSRFToken', csrftoken);
 	      update_xobj.addEventListener("load", function() {
 	        if (this.readyState === 4) {
 	          if (update_xobj.status === 200) {
@@ -431,7 +469,7 @@
 	    // (or some personas might not move if they choose not to). 
 	    // The execute_count_max is computed by tile_width/movement_speed, which
 	    // defines a one step sequence in this world. 
-	    document.getElementById("game-time-content").innerHTML = execute_movement["meta"]["curr_time"];
+	    document.getElementById("game-time-content").textContent = execute_movement["meta"]["curr_time"];
 	    for (let i=0; i<Object.keys(personas).length; i++) {
 	      let curr_persona_name = Object.keys(personas)[i];
 	      let curr_persona = personas[curr_persona_name];
@@ -518,30 +556,20 @@
 	      }
 	    }
 
-	    // Filling in the action description. 
-	    if (execute_count == execute_count_max) { 
-	      for (let i=0; i<Object.keys(personas).length; i++) {
-	      	let action_description = ""
-	        let curr_persona_name = Object.keys(personas)[i];
-	        let curr_persona_name_os = curr_persona_name.replace(/ /g,"_");
-	        let description_content = execute_movement["persona"][curr_persona_name]["description"];
-	        let chat_content = ""
+    // Filling in the action description.
+    if (execute_count == execute_count_max) {
+      for (let i=0; i<Object.keys(personas).length; i++) {
+        let curr_persona_name = Object.keys(personas)[i];
+        let curr_persona_name_os = curr_persona_name.replace(/ /g,"_");
+        let description_content = execute_movement["persona"][curr_persona_name]["description"];
+        let chatRaw = execute_movement["persona"][curr_persona_name]["chat"];
 
-	        if (execute_movement["persona"][curr_persona_name]["chat"] != null ){
-		        for (let j=0; j<execute_movement["persona"][curr_persona_name]["chat"].length; j++) { 
-		        	chat_content += execute_movement["persona"][curr_persona_name]["chat"][j][0] + ": " + execute_movement["persona"][curr_persona_name]["chat"][j][1] + "<br>"
-		        }
-		      } else {
-		      	chat_content = "<em>None at the moment</em>"
-		      }
-	        // action_description += description_content + "<br>";
+        setText("current_action__"+curr_persona_name_os, description_content.split("@")[0]);
+        setText("target_address__"+curr_persona_name_os, description_content.split("@")[1]);
+        renderChat("chat__"+curr_persona_name_os, chatRaw);
+      }
 
-	        document.getElementById("current_action__"+curr_persona_name_os).innerHTML = description_content.split("@")[0];
-	        document.getElementById("target_address__"+curr_persona_name_os).innerHTML = description_content.split("@")[1];
-	        document.getElementById("chat__"+curr_persona_name_os).innerHTML = chat_content;
-	      }
-	      
-	    }
+    }
 
 	    execute_count = execute_count - 1;
 	  }

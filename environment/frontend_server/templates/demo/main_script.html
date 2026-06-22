@@ -1,4 +1,7 @@
-{% load staticfiles %}
+{% load static %}
+
+{{ persona_init_pos|json_script:"persona-init-pos" }}
+{{ all_movement|json_script:"all-movement" }}
 
 <script type="text/javascript">
 	/*
@@ -67,7 +70,7 @@
 
 	// Persona related variables. This should have the name of the persona as its 
 	// keys, and the instances of the Persona class as the values.
-	let persona_names = {{ persona_init_pos|safe }};
+	let persona_names = JSON.parse(document.getElementById("persona-init-pos").textContent);
 	var spawn_tile_loc = {};
 	for (var key in persona_names){
 		spawn_tile_loc[key] = persona_names[key] ;
@@ -90,12 +93,34 @@
 	let execute_count_max = tile_width/movement_speed;
 	let execute_count = execute_count_max;
 	let movement_target = {};
-	let all_movement = {{ all_movement|safe }};
+	let all_movement = JSON.parse(document.getElementById("all-movement").textContent);
 
   let start_datetime =new Date(Date.parse("{{start_datetime}}"));
   var datetime_options = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' };
- 	document.getElementById("game-time-content").innerHTML = start_datetime.toLocaleTimeString("en-US", datetime_options);
- 	
+  	document.getElementById("game-time-content").textContent = start_datetime.toLocaleTimeString("en-US", datetime_options);
+
+	function setText(id, text) {
+		let el = document.getElementById(id);
+		if (el) el.textContent = text;
+	}
+
+	function renderChat(elementId, chatRaw) {
+		let el = document.getElementById(elementId);
+		if (!el) return;
+		el.innerHTML = "";
+		if (chatRaw == null) {
+			let em = document.createElement("em");
+			em.textContent = "None at the moment";
+			el.appendChild(em);
+			return;
+		}
+		for (let j = 0; j < chatRaw.length; j++) {
+			let speaker = chatRaw[j][0];
+			let text = chatRaw[j][1];
+			el.appendChild(document.createTextNode(speaker + ": " + text));
+			el.appendChild(document.createElement("br"));
+		}
+	}
 
 	// ###########################################################################
 	// ENGINE
@@ -372,7 +397,7 @@
 	  if (curr_focused_persona != "") {
 	  	player.body.x = personas[curr_focused_persona].body.x;
 	  	player.body.y = personas[curr_focused_persona].body.y;
-	  	document.getElementById("temp_focus").innerHTML = "";
+	  document.getElementById("temp_focus").textContent = "";
 	  }
 
 
@@ -394,30 +419,21 @@
 	        let description_content = all_movement[step][curr_persona_name.replace("_", " ")]["description"];
 	        let chat_content_raw = all_movement[step][curr_persona_name.replace("_", " ")]["chat"];
 
-	        let chat_content = "";
-	        if (chat_content_raw != null ){
-		        for (let j=0; j<chat_content_raw.length; j++) { 
-		        	chat_content += chat_content_raw[j][0] + ": " + chat_content_raw[j][1] + "<br>"
-		        }
-		      } else {
-		      	chat_content = "<em>None at the moment</em>"
-		      }
+       	// This is what gives the pronunciatio balloon the name initials. We 
+        // use regex to extract the initials of the personas. 
+        // E.g., "Dolores Murphy" -> "DM"
+        let rgx = new RegExp(/(\p{L}{1})\p{L}+/, 'gu');
+        let initials = [...curr_persona_name.matchAll(rgx)] || [];
+        initials = (
+          (initials.shift()?.[1] || '') + (initials.pop()?.[1] || '')
+        ).toUpperCase();
+        pronunciatios[curr_persona_name].setText(initials + ": " + pronunciatio_content);
 
-	       	// This is what gives the pronunciatio balloon the name initials. We 
-	        // use regex to extract the initials of the personas. 
-	        // E.g., "Dolores Murphy" -> "DM"
-	        let rgx = new RegExp(/(\p{L}{1})\p{L}+/, 'gu');
-	        let initials = [...curr_persona_name.matchAll(rgx)] || [];
-	        initials = (
-	          (initials.shift()?.[1] || '') + (initials.pop()?.[1] || '')
-	        ).toUpperCase();
-	        pronunciatios[curr_persona_name].setText(initials + ": " + pronunciatio_content);
-
-	        // Updating the status of each personas 
-	        document.getElementById("quick_emoji-"+curr_persona_name).innerHTML = pronunciatio_content;
-	        document.getElementById("current_action__"+curr_persona_name).innerHTML = description_content.split("@")[0];
-	        document.getElementById("target_address__"+curr_persona_name).innerHTML = description_content.split("@")[1];
-	        document.getElementById("chat__"+curr_persona_name).innerHTML = chat_content;
+        // Updating the status of each personas 
+        setText("quick_emoji-"+curr_persona_name, pronunciatio_content);
+        setText("current_action__"+curr_persona_name, description_content.split("@")[0]);
+        setText("target_address__"+curr_persona_name, description_content.split("@")[1]);
+        renderChat("chat__"+curr_persona_name, chat_content_raw);
     		}
 
     		if (execute_count > 0) {
@@ -484,8 +500,8 @@
 			execute_count = execute_count_max + 1;
 	    step = step + 1;
 
-	    start_datetime = new Date(start_datetime.getTime() + step_size);
- 			document.getElementById("game-time-content").innerHTML = start_datetime.toLocaleTimeString("en-US", datetime_options);
+    start_datetime = new Date(start_datetime.getTime() + step_size);
+  		document.getElementById("game-time-content").textContent = start_datetime.toLocaleTimeString("en-US", datetime_options);
     }
 
 	  execute_count -= 1;

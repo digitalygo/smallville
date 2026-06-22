@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% load staticfiles %}
+{% load static %}
 
 {% block content %}
 <br>
@@ -107,41 +107,32 @@
 
 
 {% block js_content %}
-<script src='https://cdn.jsdelivr.net/npm/phaser@3.55.2/dist/phaser.js'></script>
+<script src="{% static 'vendor/phaser-3.55.2/phaser.js' %}"></script>
 {% include 'demo/main_script.html' %}
 <script>
 	{% for p in persona_names %}
-		$('#on_screen_det_trigger-{{p.underscore}}').click(function() {
-			$('#on_screen_det_content-init').css({
-		      'display': 'none',
-		    });
-			{% for p_i in persona_names %}
-		    $('#on_screen_det_content-{{p_i.underscore}}').css({
-		      'display': 'none',
-		    });
-		    $('#on_screen_det_trigger-{{p_i.underscore}}').css({
-	      'font-weight': '500',
-		    });
-		    $('#on_screen_det_trigger_container-{{p_i.underscore}}').css({
-		      'background-color': 'white',
-		      'border-radius': '10px'
-		    });
-    	{% endfor %}
+		(function() {
+			let trigger = document.getElementById("on_screen_det_trigger-{{p.underscore}}");
+			if (!trigger) return;
+			trigger.addEventListener("click", function(event) {
+				event.preventDefault();
 
-    	$('#on_screen_det_trigger-{{p.underscore}}').css({
-	      'font-weight': '900',
-	    });
-	    $('#on_screen_det_trigger_container-{{p.underscore}}').css({
-	      'background-color': '#ABFF84',
-	      'border-radius': '10px'
-	    });
-	    $('#on_screen_det_content-{{p.underscore}}').css({
-	      'display': 'block',
-	    });
+				document.getElementById("on_screen_det_content-init").style.display = "none";
+				{% for p_i in persona_names %}
+					document.getElementById("on_screen_det_content-{{p_i.underscore}}").style.display = "none";
+					document.getElementById("on_screen_det_trigger-{{p_i.underscore}}").style.fontWeight = "500";
+					document.getElementById("on_screen_det_trigger_container-{{p_i.underscore}}").style.backgroundColor = "white";
+					document.getElementById("on_screen_det_trigger_container-{{p_i.underscore}}").style.borderRadius = "10px";
+				{% endfor %}
 
-	    document.getElementById("temp_focus").innerHTML = "{{p.underscore}}";
+				document.getElementById("on_screen_det_trigger-{{p.underscore}}").style.fontWeight = "900";
+				document.getElementById("on_screen_det_trigger_container-{{p.underscore}}").style.backgroundColor = "#ABFF84";
+				document.getElementById("on_screen_det_trigger_container-{{p.underscore}}").style.borderRadius = "10px";
+				document.getElementById("on_screen_det_content-{{p.underscore}}").style.display = "block";
 
-		});
+				document.getElementById("temp_focus").textContent = "{{p.underscore|escapejs}}";
+			});
+		})();
 	{% endfor %}
 </script>
 {% endblock js_content %}
