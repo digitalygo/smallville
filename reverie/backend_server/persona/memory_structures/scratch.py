@@ -147,6 +147,12 @@ class Scratch:
     self.chatting_with_buffer = dict()
     self.chatting_end_time = None
 
+    # LLM CONFIGURATION (per-persona model overrides)
+    # <llm_provider> optional override: "openai" or "openrouter"
+    self.llm_provider = None
+    # <llm_model> optional override: e.g. "gpt-4o" or "anthropic/claude-3.5-sonnet"
+    self.llm_model = None
+
     # <path_set> is True if we've already calculated the path the persona will
     # take to execute this action. That path is stored in the persona's 
     # scratch.planned_path.
@@ -230,6 +236,9 @@ class Scratch:
       else:
         self.chatting_end_time = None
 
+      self.llm_provider = scratch_load.get("llm_provider", None)
+      self.llm_model = scratch_load.get("llm_model", None)
+
       self.act_path_set = scratch_load["act_path_set"]
       self.planned_path = scratch_load["planned_path"]
 
@@ -297,6 +306,8 @@ class Scratch:
     scratch["chatting_with"] = self.chatting_with
     scratch["chat"] = self.chat
     scratch["chatting_with_buffer"] = self.chatting_with_buffer
+    scratch["llm_provider"] = self.llm_provider
+    scratch["llm_model"] = self.llm_model
     if self.chatting_end_time: 
       scratch["chatting_end_time"] = (self.chatting_end_time
                                         .strftime("%B %d, %Y, %H:%M:%S"))

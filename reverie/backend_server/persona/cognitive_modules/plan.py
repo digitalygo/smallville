@@ -353,7 +353,7 @@ def generate_new_decomp_schedule(persona, inserted_act, inserted_act_dur,  start
   count = 0 # enumerate count
   truncated_fin = False 
 
-  print ("DEBUG::: ", persona.scratch.name)
+  if debug: print ("DEBUG::: ", persona.scratch.name)
   for act, dur in p.scratch.f_daily_schedule: 
     if (dur_sum >= start_hour * 60) and (dur_sum < end_hour * 60): 
       main_act_dur += [[act, dur]]
@@ -366,7 +366,7 @@ def generate_new_decomp_schedule(persona, inserted_act, inserted_act_dur,  start
                                dur_sum - today_min_pass]] 
         truncated_act_dur[-1][-1] -= (dur_sum - today_min_pass) ######## DEC 7 DEBUG;.. is the +1 the right thing to do??? 
         # truncated_act_dur[-1][-1] -= (dur_sum - today_min_pass + 1) ######## DEC 7 DEBUG;.. is the +1 the right thing to do??? 
-        print ("DEBUG::: ", truncated_act_dur)
+        if debug: print ("DEBUG::: ", truncated_act_dur)
 
         # truncated_act_dur[-1][-1] -= (dur_sum - today_min_pass) ######## DEC 7 DEBUG;.. is the +1 the right thing to do??? 
         truncated_fin = True
@@ -423,13 +423,13 @@ def revise_identity(persona):
   plan_prompt += f" *{persona.scratch.curr_time.strftime('%A %B %d')}*? "
   plan_prompt += f"If there is any scheduling information, be as specific as possible (include date, time, and location if stated in the statement)\n\n"
   plan_prompt += f"Write the response from {p_name}'s perspective."
-  plan_note = ChatGPT_single_request(plan_prompt)
+  plan_note = ChatGPT_single_request(plan_prompt, persona=persona)
   # print (plan_note)
 
   thought_prompt = statements + "\n"
   thought_prompt += f"Given the statements above, how might we summarize {p_name}'s feelings about their days up to now?\n\n"
   thought_prompt += f"Write the response from {p_name}'s perspective."
-  thought_note = ChatGPT_single_request(thought_prompt)
+  thought_note = ChatGPT_single_request(thought_prompt, persona=persona)
   # print (thought_note)
 
   currently_prompt = f"{p_name}'s status from {(persona.scratch.curr_time - datetime.timedelta(days=1)).strftime('%A %B %d')}:\n"
@@ -441,7 +441,7 @@ def revise_identity(persona):
   currently_prompt += "Follow this format below:\nStatus: <new status>"
   # print ("DEBUG ;adjhfno;asdjao;asdfsidfjo;af", p_name)
   # print (currently_prompt)
-  new_currently = ChatGPT_single_request(currently_prompt)
+  new_currently = ChatGPT_single_request(currently_prompt, persona=persona)
   # print (new_currently)
   # print (new_currently[10:])
 
@@ -452,9 +452,9 @@ def revise_identity(persona):
   daily_req_prompt += f"Follow this format (the list should have 4~6 items but no more):\n"
   daily_req_prompt += f"1. wake up and complete the morning routine at <time>, 2. ..."
 
-  new_daily_req = ChatGPT_single_request(daily_req_prompt)
+  new_daily_req = ChatGPT_single_request(daily_req_prompt, persona=persona)
   new_daily_req = new_daily_req.replace('\n', ' ')
-  print ("WE ARE HERE!!!", new_daily_req)
+  if debug: print ("WE ARE HERE!!!", new_daily_req)
   persona.scratch.daily_plan_req = new_daily_req
 
 
@@ -595,12 +595,13 @@ def _determine_action(persona, maze):
   # Generate an <Action> instance from the action description and duration. By
   # this point, we assume that all the relevant actions are decomposed and 
   # ready in f_daily_schedule. 
-  print ("DEBUG LJSDLFSKJF")
-  for i in persona.scratch.f_daily_schedule: print (i)
-  print (curr_index)
-  print (len(persona.scratch.f_daily_schedule))
-  print (persona.scratch.name)
-  print ("------")
+  if debug:
+    print ("DEBUG LJSDLFSKJF")
+    for i in persona.scratch.f_daily_schedule: print (i)
+    print (curr_index)
+    print (len(persona.scratch.f_daily_schedule))
+    print (persona.scratch.name)
+    print ("------")
 
   # 1440
   x_emergency = 0
@@ -609,7 +610,7 @@ def _determine_action(persona, maze):
   # print ("x_emergency", x_emergency)
 
   if 1440 - x_emergency > 0: 
-    print ("x_emergency__AAA", x_emergency)
+    if debug: print ("x_emergency__AAA", x_emergency)
   persona.scratch.f_daily_schedule += [["sleeping", 1440 - x_emergency]]
   
 
