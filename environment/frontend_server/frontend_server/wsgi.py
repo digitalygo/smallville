@@ -1,16 +1,21 @@
 """
 WSGI config for frontend_server project.
 
-It exposes the WSGI callable as a module-level variable named ``application``.
-
-For more information on this file, see
-https://docs.djangoproject.com/en/2.2/howto/deployment/wsgi/
+Exposes the WSGI callable as a module-level variable named ``application``.
 """
 
 import os
+from pathlib import Path
 
 from django.core.wsgi import get_wsgi_application
+from dotenv import load_dotenv
 
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'frontend_server.settings')
+# Load root .env before Django starts
+repo_root = Path(__file__).resolve().parent.parent.parent.parent
+env_path = repo_root / ".env"
+if env_path.exists():
+    load_dotenv(str(env_path), override=False)
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "frontend_server.settings")
 
 application = get_wsgi_application()
