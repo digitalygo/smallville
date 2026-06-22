@@ -1,40 +1,15 @@
 """
 Author: Joon Sung Park (joonspk@stanford.edu)
 
-File: gpt_structure.py
-Description: Wrapper functions for calling OpenAI APIs.
+File: test.py
+Description: Test script for the GPT wrapper functions.
 """
 import json
 import random
-import openai
-import time 
+import time
 
 from utils import *
-openai.api_key = openai_api_key
-
-def ChatGPT_request(prompt): 
-  """
-  Given a prompt and a dictionary of GPT parameters, make a request to OpenAI
-  server and returns the response. 
-  ARGS:
-    prompt: a str prompt
-    gpt_parameter: a python dictionary with the keys indicating the names of  
-                   the parameter and the values indicating the parameter 
-                   values.   
-  RETURNS: 
-    a str of GPT-3's response. 
-  """
-  # temp_sleep()
-  try: 
-    completion = openai.ChatCompletion.create(
-    model="gpt-3.5-turbo", 
-    messages=[{"role": "user", "content": prompt}]
-    )
-    return completion["choices"][0]["message"]["content"]
-  
-  except: 
-    print ("ChatGPT ERROR")
-    return "ChatGPT ERROR"
+from persona.prompt_template.gpt_structure import ChatGPT_request
 
 prompt = """
 ---
@@ -61,16 +36,4 @@ Example output json:
 {"output": "[["Jane Doe", "Hi!"], ["John Doe", "Hello there!"] ... ]"}
 """
 
-print (ChatGPT_request(prompt))
-
-
-
-
-
-
-
-
-
-
-
-
+print(ChatGPT_request(prompt))
