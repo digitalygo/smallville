@@ -1,33 +1,14 @@
-###FOR PUSHING STATIC TO AWS 
+"""
+Django settings loader.
 
+Picks the settings module based on DJANGO_ENV (dev / production).
+Default: dev for local development.
+"""
+import os
 
+_env = os.environ.get("DJANGO_ENV", "dev").strip().lower()
 
-# from .base import *
-# from .production import *
-
-# try:
-#   from .local import *
-# except:
-  # pass
-
-
-
-
-
-
-###FOR GENERAL USES
-
-
-
-
-
-from .base import *
-
-try: 
-  from .local import *
-  live = False
-except:
-  live = True
-
-if live:
-  from .production import *
+if _env == "production":
+    from .production import *  # noqa: F401, F403
+else:
+    from .dev import *  # noqa: F401, F403
