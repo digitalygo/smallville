@@ -1,10 +1,8 @@
-reverie/backend_server/utils.py
-frontend_server/settings/local.py
-storage/*
-static_dirs/*
+# Frontend server runtime storage
+environment/frontend_server/temp_storage/
 
-!storage/base_the_ville_isabella_maria_klaus/*
-!storage/base_the_ville_n25/*
+# Ad-hoc simulation folders (e.g. tmp_resume_smoke)
+environment/frontend_server/storage/tmp*
 
 bin/
 include/
@@ -88,8 +86,13 @@ target/
 # celery beat schedule file
 celerybeat-schedule
 
-# dotenv
+# dotenv — all .env variants except the documented example
 .env
+.env.*
+!.env.example
+
+# uv
+.venv/
 
 # virtualenv
 venv/
@@ -100,3 +103,6 @@ ENV/
 
 # Rope project settings
 .ropeproject
+
+# Mycelium status records  (workspace snapshots stay untracked)
+substrate/traces/status/

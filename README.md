@@ -1,40 +1,102 @@
-
-
 # Generative Agents: Interactive Simulacra of Human Behavior 
 
 <p align="center" width="100%">
 <img src="cover.png" alt="Smallville" style="width: 80%; min-width: 300px; display: block; margin: auto;">
 </p>
 
-This repository accompanies our research paper titled "[Generative Agents: Interactive Simulacra of Human Behavior](https://arxiv.org/abs/2304.03442)." It contains our core simulation module for  generative agents—computational agents that simulate believable human behaviors—and their game environment. Below, we document the steps for setting up the simulation environment on your local machine and for replaying the simulation as a demo animation.
+This repository accompanies our research paper titled "[Generative Agents: Interactive Simulacra of Human Behavior](https://arxiv.org/abs/2304.03442)." It contains our core simulation module for generative agents—computational agents that simulate believable human behaviors—and their game environment. Below, we document the steps for setting up the simulation environment on your local machine and for replaying the simulation as a demo animation.
 
-## <img src="https://joonsungpark.s3.amazonaws.com:443/static/assets/characters/profile/Isabella_Rodriguez.png" alt="Generative Isabella">   Setting Up the Environment 
-To set up your environment, you will need to generate a `utils.py` file that contains your OpenAI API key and download the necessary packages.
+## <img src="https://joonsungpark.s3.amazonaws.com:443/static/assets/characters/profile/Isabella_Rodriguez.png" alt="Generative Isabella">   Setting up the environment
 
-### Step 1. Generate Utils File
-In the `reverie/backend_server` folder (where `reverie.py` is located), create a new file titled `utils.py` and copy and paste the content below into the file:
+This project uses [uv](https://docs.astral.sh/uv/) for dependency management and requires **Python 3.12+**.
+
+### Step 1. Install dependencies
+
+```bash
+uv sync
 ```
-# Copy and paste your OpenAI API Key
-openai_api_key = "<Your OpenAI API>"
-# Put your name
-key_owner = "<Name>"
 
-maze_assets_loc = "../../environment/frontend_server/static_dirs/assets"
-env_matrix = f"{maze_assets_loc}/the_ville/matrix"
-env_visuals = f"{maze_assets_loc}/the_ville/visuals"
+This installs all packages declared in `pyproject.toml` (with locked versions from `uv.lock`) into a virtual environment managed by uv.
 
-fs_storage = "../../environment/frontend_server/storage"
-fs_temp_storage = "../../environment/frontend_server/temp_storage"
+If you prefer a standard virtualenv, a legacy `requirements.txt` is still present at the repo root, but `uv sync` is the recommended approach.
 
-collision_block_id = "32125"
+### Step 2. Configure environment variables
 
-# Verbose 
-debug = True
+```bash
+cp .env.example .env
 ```
-Replace `<Your OpenAI API>` with your OpenAI API key, and `<name>` with your name.
- 
-### Step 2. Install requirements.txt
-Install everything listed in the `requirements.txt` file (I strongly recommend first setting up a virtualenv as usual). A note on Python version: we tested our environment on Python 3.9.12. 
+
+Then edit `.env` with your API keys and preferences. The configuration file (`reverie/backend_server/utils.py`) loads all settings from `.env` at runtime—no code changes needed.
+
+See the next section for provider and model options. 
+
+## <img src="https://joonsungpark.s3.amazonaws.com:443/static/assets/characters/profile/Klaus_Mueller.png" alt="Generative Klaus">   LLM provider configuration
+
+Smallville supports two providers: **OpenRouter** (recommended) and **OpenAI**.
+
+### Provider selection
+
+Set `LLM_PROVIDER` in your `.env`:
+
+```env
+LLM_PROVIDER=openrouter    # or "openai"
+```
+
+When `LLM_PROVIDER` is unset, the code falls back to `openai`.
+
+### API keys
+
+- **OpenRouter**: set `OPENROUTER_API_KEY`
+- **OpenAI**: set `OPENAI_API_KEY`
+
+You only need the key for the provider you select.
+
+### Default model
+
+Set `LLM_MODEL` to override the provider-specific default:
+
+| Provider | Default model |
+|----------|---------------|
+| OpenAI | `gpt-4o` |
+| OpenRouter | `openai/gpt-4o` |
+
+Any model slug your provider supports is valid (e.g., `anthropic/claude-3.5-sonnet` on OpenRouter).
+
+### OpenRouter attribution
+
+When using OpenRouter, the following `.env` variables are sent as attribution headers:
+
+```env
+OPENROUTER_REFERER=https://github.com/digitalygo/smallville
+OPENROUTER_TITLE=smallville
+OPENROUTER_CATEGORIES=game,roleplay
+```
+
+### Per-persona model assignment
+
+You can assign different models to individual personas. Two mechanisms exist, applied in priority order:
+
+1.  **scratch.json fields** — add optional `"llm_provider"` and `"llm_model"` fields to a persona's bootstrap `scratch.json` file.
+2.  **`LLM_PERSONA_MODELS` in `.env`** — a JSON map keyed by persona name.
+
+Example using `LLM_PERSONA_MODELS`:
+
+```env
+LLM_PERSONA_MODELS='{"Isabella Rodriguez":"openrouter:anthropic/claude-3.5-sonnet","Maria Lopez":"openai:gpt-4o"}'
+```
+
+Prefix a value with `openrouter:` or `openai:` to set both provider and model. A bare model name (e.g., `"gpt-4o"`) uses the current provider. If no override is set for a persona, the global defaults above apply.
+
+## <img src="https://joonsungpark.s3.amazonaws.com:443/static/assets/characters/profile/Klaus_Mueller.png" alt="Generative Klaus">   Operator authentication
+
+Simulation control pages (`/simulator_home`, `/path_tester/`) and POST endpoints require authentication. Create a Django superuser account:
+
+```bash
+cd environment/frontend_server
+uv run python manage.py createsuperuser
+```
+
+Then log in at `/accounts/login/` before accessing simulation controls. This is enforced in all environments (dev and production).
 
 ## <img src="https://joonsungpark.s3.amazonaws.com:443/static/assets/characters/profile/Klaus_Mueller.png" alt="Generative Klaus">   Running a Simulation 
 To run a new simulation, you will need to concurrently start two servers: the environment server and the agent simulation server.
@@ -42,21 +104,39 @@ To run a new simulation, you will need to concurrently start two servers: the en
 ### Step 1. Starting the Environment Server
 Again, the environment is implemented as a Django project, and as such, you will need to start the Django server. To do this, first navigate to `environment/frontend_server` (this is where `manage.py` is located) in your command line. Then run the following command:
 
-    python manage.py runserver
+    uv run python manage.py runserver
+
+> **Note:** The Django stack has been production-hardened with proper CSRF protection, operator authentication, input validation, and WhiteNoise static file serving. For production deployment, use `--settings=frontend_server.settings.production` with `gunicorn` (see the included `Procfile`). Run `uv run python manage.py collectstatic --no-input` first to populate the WhiteNoise static cache.
 
 Then, on your favorite browser, go to [http://localhost:8000/](http://localhost:8000/). If you see a message that says, "Your environment server is up and running," your server is running properly. Ensure that the environment server continues to run while you are running the simulation, so keep this command-line tab open! (Note: I recommend using either Chrome or Safari. Firefox might produce some frontend glitches, although it should not interfere with the actual simulation.)
 
 ### Step 2. Starting the Simulation Server
 Open up another command line (the one you used in Step 1 should still be running the environment server, so leave that as it is). Navigate to `reverie/backend_server` and run `reverie.py`.
 
-    python reverie.py
+**Interactive mode** (original, with CLI prompts):
+
+    uv run python reverie.py
+
 This will start the simulation server. A command-line prompt will appear, asking the following: "Enter the name of the forked simulation: ". To start a 3-agent simulation with Isabella Rodriguez, Maria Lopez, and Klaus Mueller, type the following:
     
     base_the_ville_isabella_maria_klaus
+
 The prompt will then ask, "Enter the name of the new simulation: ". Type any name to denote your current simulation (e.g., just "test-simulation" will do for now).
 
     test-simulation
+
 Keep the simulator server running. At this stage, it will display the following prompt: "Enter option: "
+
+**Service mode** (non-interactive, for production deployment):
+
+    uv run python reverie.py --serve \\
+        --origin base_the_ville_isabella_maria_klaus \\
+        --target MySimulation
+
+This starts the backend in a non-interactive loop that processes simulation steps as the frontend writes environment files. The service autosaves every 10 steps and exits cleanly on `Ctrl+C`. To resume a previously saved simulation without re-forking:
+
+    uv run python reverie.py --serve --resume \\
+        --target MySimulation
 
 ### Step 3. Running and Saving the Simulation
 On your browser, navigate to [http://localhost:8000/simulator_home](http://localhost:8000/simulator_home). You should see the map of Smallville, along with a list of active agents on the map. You can move around the map using your keyboard arrows. Please keep this tab open. To run the simulation, type the following command in your simulation server in response to the prompt, "Enter option":
@@ -83,6 +163,64 @@ To start the demo, go to the following address on your browser: `http://localhos
 
 ### Tips
 We've noticed that OpenAI's API can hang when it reaches the hourly rate limit. When this happens, you may need to restart your simulation. For now, we recommend saving your simulation often as you progress to ensure that you lose as little of the simulation as possible when you do need to stop and rerun it. Running these simulations, at least as of early 2023, could be somewhat costly, especially when there are many agents in the environment.
+
+## <img src="https://joonsungpark.s3.amazonaws.com:443/static/assets/characters/profile/Isabella_Rodriguez.png" alt="Generative Isabella">   Production deployment (Docker Compose)
+
+The repo includes a containerized production stack (`web` + `backend` + `db`).
+
+### Prerequisites
+
+- Docker Engine and Compose Plugin v2 installed.
+- At minimum these `.env` vars set (copy from `.env.example` first):
+  - `DJANGO_SECRET_KEY` — a random 50+ char string
+  - `OPENROUTER_API_KEY` (or `OPENAI_API_KEY`)
+  - `REVERIE_SIM_CODE` — name for the simulation (e.g. `MySimulation`)
+  - `REVERIE_FORK_SIM_CODE` — base fork name, only needed for the first run (e.g. `base_the_ville_isabella_maria_klaus`)
+
+```bash
+cp .env.example .env
+# then edit .env with your values
+```
+
+### Build and start
+
+```bash
+docker compose -f docker-compose.prod.yml up --build -d
+```
+
+This builds the `smallville:latest` image once, then starts three services:
+
+| Service | What it runs |
+|---------|--------------|
+| `web` | gunicorn (`frontend_server.wsgi`) with Django production settings, bound to `:8000` |
+| `backend` | `reverie.py --serve --resume` — autosaves every 10 steps |
+| `db` | PostgreSQL 16, auto-connected via `DATABASE_URL` |
+
+The web service is exposed on `${WEB_PORT:-8000}`. The backend and db communicate on an internal bridge network.
+
+### First-login and superuser account
+
+Navigate to `http://localhost:8000/accounts/login/`, then create a superuser inside the running container:
+
+```bash
+docker compose -f docker-compose.prod.yml exec web python manage.py createsuperuser
+```
+
+Log in with those credentials to access simulation controls (`/simulator_home`, `/path_tester/`).
+
+### Shared simulation storage
+
+The `web` and `backend` services share the same simulation storage through Docker volumes — specifically `smallville_storage` (simulations) and `smallville_temp_storage` (runtime state). The frontend writes environment files that the backend reads each step, then writes its output back for the frontend to render.
+
+### HTTPS / reverse proxy
+
+The stack enables `DJANGO_SECURE_SSL_REDIRECT=true` by default (secure). When running without a TLS-terminating reverse proxy, override in `.env`:
+
+```bash
+DJANGO_SECURE_SSL_REDIRECT=false
+```
+
+For production expose, place a reverse proxy (nginx, Caddy, Traefik) in front of the `web` service to handle TLS termination and keep the default SSL redirect on.
 
 ## <img src="https://joonsungpark.s3.amazonaws.com:443/static/assets/characters/profile/Maria_Lopez.png" alt="Generative Maria">   Simulation Storage Location
 All simulations that you save will be located in `environment/frontend_server/storage`, and all compressed demos will be located in `environment/frontend_server/compressed_storage`. 
