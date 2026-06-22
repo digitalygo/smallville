@@ -1,0 +1,60 @@
+# Python artifacts
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# IDE and editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tests and coverage
+htmlcov/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+
+# SQLite databases (use PostgreSQL in production)
+*.sqlite3
+
+# Runtime data — mounted at runtime, huge (storage/ alone is 1.1 GiB)
+environment/frontend_server/storage/
+environment/frontend_server/temp_storage/
+environment/frontend_server/compressed_storage/
+environment/static_root/
+environment/media_root/
+
+# Logs
+*.log
+
+# Docker
+.dockerignore
+Dockerfile
+docker-compose*.yml
+
+# Documentation
+README.md
+LICENSE

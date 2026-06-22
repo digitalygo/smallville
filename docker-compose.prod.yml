@@ -1,0 +1,190 @@
+# smallville production deployment
+#
+# Start:
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# Stop:
+#   docker compose -f docker-compose.prod.yml down
+#
+# Requirements:
+#   - .env file at repo root with required secrets (see .env.example)
+#   - At minimum: DJANGO_SECRET_KEY, REVERIE_SIM_CODE
+#   - For fresh fork: REVERIE_FORK_SIM_CODE
+
+services:
+  web:
+    image: smallville:latest
+    build: .
+    container_name: smallville-web
+    hostname: web
+    user: "65534:65534"
+    working_dir: /app/environment/frontend_server
+    command: >
+      sh -c "
+        python manage.py migrate --noinput &&
+        python manage.py collectstatic --noinput &&
+        exec gunicorn frontend_server.wsgi:application
+          --bind 0.0.0.0:8000
+          --workers 4
+          --access-logfile -
+          --error-logfile -
+          --timeout 120
+      "
+    environment:
+      # Hardcoded production defaults — never override these
+      DJANGO_ENV: production
+      DJANGO_DEBUG: "false"
+      # Env-driven SSL redirect. Default true (secure). Override in .env
+      # if running without a TLS-terminating reverse proxy.
+      DJANGO_SECURE_SSL_REDIRECT: "${DJANGO_SECURE_SSL_REDIRECT:-true}"
+      # Composed from .env values with defaults
+      DATABASE_URL: postgres://${POSTGRES_USER:-smallville}:${POSTGRES_PASSWORD:-smallville}@db:5432/${POSTGRES_DB:-smallville}
+    env_file:
+      - .env
+    ports:
+      - "${WEB_PORT:-8000}:8000"
+    expose:
+      - "8000"
+    volumes:
+      - storage_data:/app/environment/frontend_server/storage
+      - temp_data:/app/environment/frontend_server/temp_storage
+      - static_data:/app/environment/static_root
+      - media_data:/app/environment/media_root
+    tmpfs:
+      - /tmp:uid=65534,gid=65534
+    networks:
+      - internal
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/', timeout=5).read()\" || exit 1",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # read_only omitted: production.py uses RotatingFileHandler writing
+    # to /app/environment/django.log, which sits outside the volume mounts.
+    labels:
+      - "org.opencontainers.image.title=smallville-web"
+
+  backend:
+    image: smallville:latest
+    container_name: smallville-backend
+    hostname: backend
+    user: "65534:65534"
+    working_dir: /app/reverie/backend_server
+    command: >
+      sh -c "
+        exec python reverie.py --serve --resume
+          --autosave-interval ${REVERIE_AUTOSAVE_INTERVAL:-10}
+      "
+    environment:
+      REVERIE_FORK_SIM_CODE: "${REVERIE_FORK_SIM_CODE:-}"
+      REVERIE_SIM_CODE: "${REVERIE_SIM_CODE:-}"
+    env_file:
+      - .env
+    volumes:
+      - storage_data:/app/environment/frontend_server/storage
+      - temp_data:/app/environment/frontend_server/temp_storage
+    tmpfs:
+      - /tmp:uid=65534,gid=65534
+    networks:
+      - internal
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "test -f /app/environment/frontend_server/temp_storage/curr_sim_code.json || exit 1",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    labels:
+      - "org.opencontainers.image.title=smallville-backend"
+
+  db:
+    image: postgres:16-alpine
+    container_name: smallville-db
+    hostname: db
+    user: "70:70"
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-smallville}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-smallville}"
+      POSTGRES_DB: "${POSTGRES_DB:-smallville}"
+      PGDATA: /var/lib/postgresql/data/pgdata
+    expose:
+      - "5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    tmpfs:
+      - /var/run/postgresql:uid=70,gid=70
+    networks:
+      - internal
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-smallville} -d ${POSTGRES_DB:-smallville}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    labels:
+      - "org.opencontainers.image.title=smallville-db"
+
+networks:
+  internal:
+    driver: bridge
+    labels:
+      - "org.opencontainers.image.title=smallville-net"
+
+volumes:
+  storage_data:
+    name: smallville_storage
+  temp_data:
+    name: smallville_temp_storage
+  static_data:
+    name: smallville_static
+  media_data:
+    name: smallville_media
+  pgdata:
+    name: smallville_pgdata
