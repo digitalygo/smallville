@@ -10,7 +10,6 @@ from pathlib import Path
 from django.core.wsgi import get_wsgi_application
 from dotenv import load_dotenv
 
-# Load root .env before Django starts
 repo_root = Path(__file__).resolve().parent.parent.parent.parent
 env_path = repo_root / ".env"
 if env_path.exists():

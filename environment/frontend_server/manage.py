@@ -8,7 +8,6 @@ from dotenv import load_dotenv
 
 
 def main():
-    # Load root .env before Django starts
     repo_root = Path(__file__).resolve().parent.parent.parent
     env_path = repo_root / ".env"
     if env_path.exists():

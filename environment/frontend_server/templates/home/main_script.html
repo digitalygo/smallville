@@ -5,9 +5,10 @@
 <div id="sim_code" style="display:none">{{sim_code}}</div>
 <div id="persona_name_list" style="display:none">{{persona_name_str}}</div>
 {{ persona_init_pos|json_script:"persona-init-pos" }}
+{{ mode|json_script:"simulator-mode" }}
+{{ initial_phase|json_script:"initial-phase" }}
 
 <script type="text/javascript">
-	// CSRF token helper for Django POST requests
 	function getCookie(name) {
 		let cookieValue = null;
 		if (document.cookie && document.cookie !== '') {
@@ -43,11 +44,27 @@
 
 	// <step> -- one full loop around all three phases determined by <phase> is 
 	// a step. We use this to link the steps in the backend. 
-	let step = parseInt(document.getElementById('step').textContent);
+	const terminalStep = Number.MAX_SAFE_INTEGER;
+	const lastExecutableStep = terminalStep - 1;
+	const initialStepText = document.getElementById('step').textContent;
+	const parsedInitialStep = Number(initialStepText);
+	const initialStepIsValid = initialStepText.trim() !== "" && Number.isSafeInteger(parsedInitialStep) && parsedInitialStep >= 0;
+	let step = initialStepIsValid ? parsedInitialStep : 0;
 	let sim_code = document.getElementById('sim_code').textContent;
 	// let persona_names = document.getElementById('persona_name_list').textContent.split(",");
 
 	let persona_init_pos = JSON.parse(document.getElementById('persona-init-pos').textContent);
+	function getJsonScriptValue(id, fallback) {
+		let element = document.getElementById(id);
+		if (!element) return fallback;
+		try {
+			return JSON.parse(element.textContent);
+		} catch {
+			return fallback;
+		}
+	}
+	const simulatorMode = getJsonScriptValue("simulator-mode", "");
+	const initialPhase = getJsonScriptValue("initial-phase", "");
 	let persona_names = {};
 	for (let i = 0, l = persona_init_pos.length; i < l; i++) {
 		let x = persona_init_pos[i];
@@ -105,7 +122,6 @@
 	for (var key in persona_names){
 		spawn_tile_loc[key] = persona_names[key] ;
 	}
-	console.log(spawn_tile_loc);
 
 	var personas = {};
 	var pronunciatios = {};
@@ -121,13 +137,23 @@
 	// <movement_speed> determines how fast we move at each upate cylce. 
 	let movement_speed = 32; 
 
-	// <timer_max> determines how frequently our update function will query the 
-	// frontend server. If it's higher, we wait longer cycles. 
-	let timer_max = 0;
-	let timer = timer_max;
-
 	// <phase> -- there are three phases: "process," "update," and "execute."
-	let phase = "update"; // or "update" or "execute"
+	let phase = !initialStepIsValid || step === terminalStep ? "complete" : simulatorMode === "simulate" && (initialPhase === "process" || initialPhase === "update") ? initialPhase : "update";
+	const processEnvironmentUrl = "{% url 'process_environment' %}";
+	const updateEnvironmentUrl = "{% url 'update_environment' %}";
+	const replayMovementUrl = "{% url 'replay_movement' %}";
+	const movementUpdateUrl = simulatorMode === "replay" ? replayMovementUrl : updateEnvironmentUrl;
+	const retryBaseDelay = 250;
+	const retryMaxDelay = 5000;
+	const retryAttemptLimit = 5;
+	let environmentPostInFlight = false;
+	let environmentRetryAt = 0;
+	let environmentRetryAttempts = 0;
+	let movementPollInFlight = false;
+	let movementPollRetryAt = 0;
+	let movementPollRetryAttempts = 0;
+	let resyncInProgress = false;
+	let replayComplete = phase === "complete";
 
 	// Variables for storing movements that are sent from the backend server.
 	let execute_movement;
@@ -155,6 +181,169 @@
 			let text = chatRaw[j][1];
 			el.appendChild(document.createTextNode(speaker + ": " + text));
 			el.appendChild(document.createElement("br"));
+		}
+	}
+
+	function retryDelay(attempts) {
+		return Math.min(retryBaseDelay * (2 ** attempts), retryMaxDelay);
+	}
+
+	function isExecutableStep(value) {
+		return Number.isSafeInteger(value) && value >= 0 && value < terminalStep;
+	}
+
+	function stopSimulator() {
+		phase = "complete";
+		replayComplete = true;
+		environmentRetryAt = Infinity;
+		movementPollRetryAt = Infinity;
+	}
+
+	function scheduleEnvironmentRetry() {
+		environmentRetryAt = Date.now() + retryDelay(environmentRetryAttempts);
+		environmentRetryAttempts = Math.min(environmentRetryAttempts + 1, retryAttemptLimit);
+	}
+
+	function scheduleMovementPollRetry() {
+		movementPollRetryAt = Date.now() + retryDelay(movementPollRetryAttempts);
+		movementPollRetryAttempts = Math.min(movementPollRetryAttempts + 1, retryAttemptLimit);
+	}
+
+	function requestResync() {
+		if (resyncInProgress) return;
+		resyncInProgress = true;
+		stopSimulator();
+		window.location.reload();
+	}
+
+	function failToStartSimulator() {
+		setText("game-time-content", "Unable to start simulator.");
+		requestResync();
+	}
+
+	function isReadyMovement(movement, expectedStep) {
+		if (!isExecutableStep(expectedStep)) return false;
+		if (!movement || typeof movement !== "object" || Array.isArray(movement)) return false;
+		if (movement["<step>"] !== expectedStep) return false;
+		if (!movement.meta || typeof movement.meta !== "object" || Array.isArray(movement.meta)) return false;
+		if (!("curr_time" in movement.meta)) return false;
+		if (!movement.persona || typeof movement.persona !== "object" || Array.isArray(movement.persona)) return false;
+
+		for (let i = 0; i < Object.keys(personas).length; i++) {
+			let personaName = Object.keys(personas)[i];
+			let personaMovement = movement.persona[personaName];
+			if (!personaMovement || typeof personaMovement !== "object" || Array.isArray(personaMovement)) return false;
+			if (!Array.isArray(personaMovement.movement) || personaMovement.movement.length < 2) return false;
+			if (!Number.isFinite(personaMovement.movement[0]) || !Number.isFinite(personaMovement.movement[1])) return false;
+			if (typeof personaMovement.pronunciatio !== "string" || typeof personaMovement.description !== "string") return false;
+			if (personaMovement.chat !== null && (!Array.isArray(personaMovement.chat) || !personaMovement.chat.every((entry) => Array.isArray(entry) && entry.length >= 2))) return false;
+		}
+
+		return true;
+	}
+
+	async function postEnvironment(data, postedStep) {
+		if (simulatorMode !== "simulate") return;
+		if (resyncInProgress) return;
+		if (phase === "complete" || !isExecutableStep(postedStep)) return;
+		environmentPostInFlight = true;
+		try {
+			let response = await fetch(processEnvironmentUrl, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"X-CSRFToken": csrftoken
+				},
+				credentials: "same-origin",
+				body: JSON.stringify(data)
+			});
+			if (response.status === 409) {
+				requestResync();
+				return;
+			}
+			if (response.status === 503) {
+				scheduleEnvironmentRetry();
+				return;
+			}
+			if (!response.ok) {
+				scheduleEnvironmentRetry();
+				return;
+			}
+			if (phase === "process" && step === postedStep) {
+				environmentRetryAt = 0;
+				environmentRetryAttempts = 0;
+				movementPollRetryAt = 0;
+				movementPollRetryAttempts = 0;
+				phase = "update";
+			}
+		} catch {
+			scheduleEnvironmentRetry();
+		} finally {
+			environmentPostInFlight = false;
+		}
+	}
+
+	async function pollMovement(pollStep) {
+		if (resyncInProgress) return;
+		if (phase === "complete" || !isExecutableStep(pollStep)) return;
+		movementPollInFlight = true;
+		try {
+			let response = await fetch(movementUpdateUrl, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"X-CSRFToken": csrftoken
+				},
+				credentials: "same-origin",
+				body: JSON.stringify({"step": pollStep, "sim_code": sim_code})
+			});
+			if (response.status === 409 && simulatorMode === "simulate") {
+				let resync;
+				try {
+					resync = await response.json();
+				} catch {
+					resync = null;
+				}
+				if (resync && typeof resync === "object" && !Array.isArray(resync) && resync.status === "resync") {
+					requestResync();
+					return;
+				}
+				if (phase === "update" && step === pollStep) scheduleMovementPollRetry();
+				return;
+			}
+			if (response.status === 503) {
+				if (phase === "update" && step === pollStep) scheduleMovementPollRetry();
+				return;
+			}
+			let movement;
+			try {
+				movement = await response.json();
+			} catch {
+				if (phase === "update" && step === pollStep) scheduleMovementPollRetry();
+				return;
+			}
+
+			if (simulatorMode === "replay" && movement && movement.status === "complete") {
+				stopSimulator();
+				return;
+			}
+			if (!response.ok) {
+				if (phase === "update" && step === pollStep) scheduleMovementPollRetry();
+				return;
+			}
+			if (phase !== "update" || step !== pollStep) return;
+			if (!isReadyMovement(movement, pollStep)) {
+				scheduleMovementPollRetry();
+				return;
+			}
+			execute_movement = movement;
+			movementPollRetryAt = 0;
+			movementPollRetryAttempts = 0;
+			phase = "execute";
+		} catch {
+			if (phase === "update" && step === pollStep) scheduleMovementPollRetry();
+		} finally {
+			movementPollInFlight = false;
 		}
 	}
 
@@ -381,6 +570,21 @@
 			game_pause();
 		};
 
+	  if (!initialStepIsValid) {
+	    failToStartSimulator();
+	    return;
+	  }
+	  if (step === terminalStep) {
+	    stopSimulator();
+	    return;
+	  }
+	  if (!isExecutableStep(step)) {
+	    requestResync();
+	    return;
+	  }
+	  if (resyncInProgress) return;
+	  if (phase === "complete") return;
+
 	  // *** MOVE CAMERA *** 
 	  // This is where we finish up the camera setting we started in the create() 
 	  // function. We set the movement speed of the camera and wire up the keys to
@@ -406,7 +610,7 @@
 	  // Moving personas take place in three distinct phases: "process," "update,"
 	  // and "execute." These phases are determined by the value of <phase>. 
 	  // Only one of the three phases is incurred in each update cycle. 
-	  if (phase == "process") {
+	  if (phase == "process" && simulatorMode === "simulate") {
 	    // "process" takes all current locations of the personas and send them to
 	    // the frontend server in a json form. Here, we first create the json 
 	    // file that records all persona locations: 
@@ -419,17 +623,9 @@
 	                                           "x": Math.ceil((personas[persona_name].body.position.x) / tile_width),
 	                                           "y": Math.ceil((personas[persona_name].body.position.y) / tile_width)}
 	    }
-	    var json = JSON.stringify(data);
-	    // We then send this to the frontend server: 
-	    var retrieve_xobj = new XMLHttpRequest();
-	    retrieve_xobj.overrideMimeType("application/json");
-	    retrieve_xobj.open('POST', "{% url 'process_environment' %}", true);
-	    retrieve_xobj.setRequestHeader('X-CSRFToken', csrftoken);
-	    retrieve_xobj.send(json);   
-	    // Finally, we update the phase variable to start the "udpate" process. 
-	    // Now that we sent all persona locations to the backend server, we need
-	    // to wait until the backend determines what the personas will do next. 
-	    phase = "update";
+	    if (!environmentPostInFlight && Date.now() >= environmentRetryAt) {
+	      void postEnvironment(data, step);
+	    }
 	  } 
 
 	  else if (phase == "update") { 
@@ -439,31 +635,12 @@
 	    // We do this by continuously asking the backend server if it is ready. 
 	    // The backend server is ready when it returns a json that has a key-val
 	    // pair with "<move>": true.
-	    // Note that we do not want to overburden the backend too much by 
-	    // over-querying; so, we have a timer set so we only query it once every
-	    // timer_max cycles. 
-	    if (timer <= 0) {
-	      var update_xobj = new XMLHttpRequest();
-	      update_xobj.overrideMimeType("application/json");
-	      update_xobj.open('POST', "{% url 'update_environment' %}", true);
-	      update_xobj.setRequestHeader('X-CSRFToken', csrftoken);
-	      update_xobj.addEventListener("load", function() {
-	        if (this.readyState === 4) {
-	          if (update_xobj.status === 200) {
-	            if (JSON.parse(update_xobj.responseText)["<step>"] == step) {
-	              execute_movement = JSON.parse(update_xobj.responseText)
-	              phase = "execute";
-	            }
-	            timer = timer_max;
-	          }
-	        }
-	      });
-	      update_xobj.send(JSON.stringify({"step": step, "sim_code": sim_code }));   
+	    if (!replayComplete && !movementPollInFlight && Date.now() >= movementPollRetryAt) {
+	      void pollMovement(step);
 	    }
-	    timer = timer - 1; 
 	  } 
 
-	  else { 
+	  else if (phase === "execute") {
 	    // This is where we actually move the personas in the visual world. Each
 	    // backend computation in execute_movement moves each persona by one tile
 	    // (or some personas might not move if they choose not to). 
@@ -492,7 +669,6 @@
 	        pronunciatios[curr_persona_name].setText(initials + ": " + pronunciatio_content);
 	      }
 
-	      console.log(curr_persona_name);
 	      if (execute_count > 0) {
 	        if (curr_persona.body.x < movement_target[curr_persona_name][0]) {
 	          curr_persona.body.x += movement_speed; 
@@ -550,9 +726,14 @@
 	          curr_persona.body.x = movement_target[curr_persona_name][0];
 	          curr_persona.body.y = movement_target[curr_persona_name][1];
 	        }
-	        phase = "process";
+	        if (step === lastExecutableStep) {
+	          step = terminalStep;
+	          stopSimulator();
+	        } else {
+	          phase = simulatorMode === "replay" ? "update" : "process";
+	          step += 1;
+	        }
 	        execute_count = execute_count_max + 1;
-	        step = step + 1;
 	      }
 	    }
 
@@ -579,10 +760,3 @@
 	var play_button=document.getElementById("play_button");
 	var pause_button=document.getElementById("pause_button");
 </script>
-
-
-
-
-
-
-

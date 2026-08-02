@@ -1,1 +1,1 @@
-web: gunicorn frontend_server.wsgi --timeout 600 --log-file -
+web: DJANGO_ENV=production gunicorn frontend_server.wsgi --timeout 600 --log-file -

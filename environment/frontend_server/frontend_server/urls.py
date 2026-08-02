@@ -25,6 +25,7 @@ urlpatterns = [
     ),
     path("process_environment/", translator_views.process_environment, name="process_environment"),
     path("update_environment/", translator_views.update_environment, name="update_environment"),
+    path("replay_movement/", translator_views.replay_movement, name="replay_movement"),
     path("path_tester/", translator_views.path_tester, name="path_tester"),
     path("path_tester_update/", translator_views.path_tester_update, name="path_tester_update"),
     path("health/", translator_views.health, name="health"),

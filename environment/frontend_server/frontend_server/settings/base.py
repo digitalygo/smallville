@@ -2,40 +2,77 @@
 Django base settings for frontend_server.
 
 Loads secrets and deployment flags from a root-level .env file.
-Never hardcode secrets here — use environment variables.
+Never hardcode secrets here: use environment variables.
 """
 
+import ipaddress
 import os
 from pathlib import Path
 
 import dj_database_url
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
-# ---------------------------------------------------------------------------
-# Locate and load the root .env file
-#   environment/frontend_server/frontend_server/settings/base.py
-#   ->  environment/frontend_server  (BASE_DIR parent)
-#   ->  environment  (grandparent)
-#   ->  repo root  (great-grandparent, where .env lives)
-# ---------------------------------------------------------------------------
+
+def _env_bool(name, default):
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in ("true", "1", "yes"):
+        return True
+    if raw in ("false", "0", "no"):
+        return False
+    raise ImproperlyConfigured(
+        f"{name} must be one of true/1/yes or false/0/no, got {raw!r}."
+    )
+
+
+def _positive_int(name, default):
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ImproperlyConfigured(
+            f"{name} must be a positive integer, got {raw!r}."
+        ) from None
+    if value <= 0:
+        raise ImproperlyConfigured(
+            f"{name} must be a positive integer, got {raw!r}."
+        )
+    return value
+
+
+def _cidr_list(name):
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return []
+    networks = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(entry, strict=False))
+        except ValueError:
+            raise ImproperlyConfigured(
+                f"{name} contains an invalid CIDR: {entry!r}."
+            ) from None
+    return networks
+
 SETTINGS_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = SETTINGS_DIR.parent
-PROJECT_DIR = FRONTEND_DIR.parent  # environment/frontend_server
-REPO_ROOT = PROJECT_DIR.parent.parent  # repo root
+PROJECT_DIR = FRONTEND_DIR.parent
+REPO_ROOT = PROJECT_DIR.parent.parent
 
 for candidate in (REPO_ROOT / ".env", PROJECT_DIR / ".env", FRONTEND_DIR / ".env"):
     if candidate.exists():
         load_dotenv(str(candidate), override=False)
         break
 
-# ---------------------------------------------------------------------------
-# Base paths
-# ---------------------------------------------------------------------------
-BASE_DIR = PROJECT_DIR  # environment/frontend_server/
+BASE_DIR = PROJECT_DIR
 
-# ---------------------------------------------------------------------------
-# Security — all from environment
-# ---------------------------------------------------------------------------
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "insecure-dev-key-change-me")
 DEBUG = os.getenv("DJANGO_DEBUG", "False").lower() in ("true", "1", "yes")
 ALLOWED_HOSTS = [
@@ -44,18 +81,26 @@ ALLOWED_HOSTS = [
     if h.strip()
 ]
 
-# ---------------------------------------------------------------------------
-# CSRF
-# ---------------------------------------------------------------------------
 CSRF_TRUSTED_ORIGINS = [
     o.strip()
     for o in os.getenv("DJANGO_CSRF_TRUSTED_ORIGINS", "http://localhost:8000").split(",")
     if o.strip()
 ]
 
-# ---------------------------------------------------------------------------
+LOGIN_THROTTLE_ENABLED = _env_bool("LOGIN_THROTTLE_ENABLED", True)
+LOGIN_THROTTLE_FAIL_OPEN = _env_bool("LOGIN_THROTTLE_FAIL_OPEN", False)
+LOGIN_THROTTLE_SOURCE_THRESHOLD = _positive_int("LOGIN_THROTTLE_SOURCE_THRESHOLD", 20)
+LOGIN_THROTTLE_ACCOUNT_THRESHOLD = _positive_int("LOGIN_THROTTLE_ACCOUNT_THRESHOLD", 5)
+LOGIN_THROTTLE_WINDOW_SECONDS = _positive_int("LOGIN_THROTTLE_WINDOW_SECONDS", 300)
+LOGIN_THROTTLE_BASE_DELAY_SECONDS = _positive_int(
+    "LOGIN_THROTTLE_BASE_DELAY_SECONDS", 1
+)
+LOGIN_THROTTLE_MAX_DELAY_SECONDS = _positive_int(
+    "LOGIN_THROTTLE_MAX_DELAY_SECONDS", 300
+)
+LOGIN_THROTTLE_TRUSTED_PROXY_CIDRS = _cidr_list("LOGIN_THROTTLE_TRUSTED_PROXY_CIDRS")
+
 # Application definition
-# ---------------------------------------------------------------------------
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
@@ -72,6 +117,7 @@ MIDDLEWARE = [
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
+    "translator.middleware.LoginThrottleMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
@@ -97,9 +143,6 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "frontend_server.wsgi.application"
 
-# ---------------------------------------------------------------------------
-# Database  (SQLite by default, DATABASE_URL for PostgreSQL in production)
-# ---------------------------------------------------------------------------
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 if DATABASE_URL:
     DATABASES = {"default": dj_database_url.parse(DATABASE_URL)}
@@ -111,12 +154,9 @@ else:
         }
     }
 
-# Default primary key field type (required since Django 3.2)
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-# ---------------------------------------------------------------------------
 # Password validation
-# ---------------------------------------------------------------------------
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
@@ -124,39 +164,30 @@ AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
 
-# ---------------------------------------------------------------------------
+LOGIN_URL = "/accounts/login/"
+LOGIN_REDIRECT_URL = "/simulator_home"
+
 # Internationalization
-# ---------------------------------------------------------------------------
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = "UTC"
 USE_I18N = True
 USE_TZ = True
 
-# ---------------------------------------------------------------------------
-# Static files  (WhiteNoise for production serving)
-# ---------------------------------------------------------------------------
 STATIC_URL = "/static/"
 STATIC_ROOT = os.path.join(os.path.dirname(BASE_DIR), "static_root")
 STATICFILES_DIRS = [
     os.path.join(BASE_DIR, "static_dirs"),
 ]
 
-# WhiteNoise: compressed, immutable cache-busting
 STORAGES = {
     "staticfiles": {
         "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
     },
 }
 
-# ---------------------------------------------------------------------------
-# Media files
-# ---------------------------------------------------------------------------
 MEDIA_URL = "/media/"
 MEDIA_ROOT = os.path.join(os.path.dirname(BASE_DIR), "media_root")
 
-# ---------------------------------------------------------------------------
-# Logging — warn+ to stderr by default
-# ---------------------------------------------------------------------------
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,

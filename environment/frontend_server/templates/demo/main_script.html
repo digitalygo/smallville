@@ -97,7 +97,7 @@
 
   let start_datetime =new Date(Date.parse("{{start_datetime}}"));
   var datetime_options = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' };
-  	document.getElementById("game-time-content").textContent = start_datetime.toLocaleTimeString("en-US", datetime_options);
+  document.getElementById("game-time-content").textContent = start_datetime.toLocaleTimeString("en-US", datetime_options);
 
 	function setText(id, text) {
 		let el = document.getElementById(id);
@@ -328,7 +328,6 @@
 			let down_walk_name = persona_name + "-down-walk";
 			let up_walk_name = persona_name + "-up-walk";
 
-			console.log(persona_name, left_walk_name, "DEUBG")
 		  anims.create({
 		    key: left_walk_name,
 		    frames: anims.generateFrameNames(persona_name, { prefix: "left-walk.", start: 0, end: 3, zeroPad: 3 }),
@@ -419,8 +418,8 @@
 	        let description_content = all_movement[step][curr_persona_name.replace("_", " ")]["description"];
 	        let chat_content_raw = all_movement[step][curr_persona_name.replace("_", " ")]["chat"];
 
-       	// This is what gives the pronunciatio balloon the name initials. We 
-        // use regex to extract the initials of the personas. 
+        // This is what gives the pronunciatio balloon the name initials. We
+        // use regex to extract the initials of the personas.
         // E.g., "Dolores Murphy" -> "DM"
         let rgx = new RegExp(/(\p{L}{1})\p{L}+/, 'gu');
         let initials = [...curr_persona_name.matchAll(rgx)] || [];
@@ -429,7 +428,7 @@
         ).toUpperCase();
         pronunciatios[curr_persona_name].setText(initials + ": " + pronunciatio_content);
 
-        // Updating the status of each personas 
+        // Updating the status of each personas
         setText("quick_emoji-"+curr_persona_name, pronunciatio_content);
         setText("current_action__"+curr_persona_name, description_content.split("@")[0]);
         setText("target_address__"+curr_persona_name, description_content.split("@")[1]);
@@ -501,7 +500,7 @@
 	    step = step + 1;
 
     start_datetime = new Date(start_datetime.getTime() + step_size);
-  		document.getElementById("game-time-content").textContent = start_datetime.toLocaleTimeString("en-US", datetime_options);
+    document.getElementById("game-time-content").textContent = start_datetime.toLocaleTimeString("en-US", datetime_options);
     }
 
 	  execute_count -= 1;
@@ -511,8 +510,6 @@
 	var play_button=document.getElementById("play_button");
 	var pause_button=document.getElementById("pause_button");
 </script>
-
-
 
 
 
