@@ -44,7 +44,8 @@ def generate_insights_and_evidence(persona, nodes, n=5):
 
   ret = run_gpt_prompt_insight_and_guidance(persona, statements, n)[0]
 
-  print (ret)
+  if debug:
+    print (ret)
   try: 
 
     for thought, evi_raw in ret.items(): 
@@ -116,7 +117,8 @@ def run_reflect(persona):
   # agent's memory. 
   for focal_pt, nodes in retrieved.items(): 
     xx = [i.embedding_key for i in nodes]
-    for xxx in xx: print (xxx)
+    if debug:
+      for xxx in xx: print (xxx)
 
     thoughts = generate_insights_and_evidence(persona, nodes, 5)
     for thought, evidence in thoughts.items(): 
@@ -125,29 +127,30 @@ def run_reflect(persona):
       s, p, o = generate_action_event_triple(thought, persona)
       keywords = set([s, p, o])
       thought_poignancy = generate_poig_score(persona, "thought", thought)
-      thought_embedding_pair = (thought, get_embedding(thought))
+      thought_embedding_pair = (thought, get_embedding(thought, persona=persona))
 
       persona.a_mem.add_thought(created, expiration, s, p, o, 
                                 thought, keywords, thought_poignancy, 
                                 thought_embedding_pair, evidence)
 
 
-def reflection_trigger(persona): 
+def reflection_trigger(persona):
   """
-  Given the current persona, determine whether the persona should run a 
-  reflection. 
-  
+  Given the current persona, determine whether the persona should run a
+  reflection.
+
   Our current implementation checks for whether the sum of the new importance
   measure has reached the set (hyper-parameter) threshold.
 
-  INPUT: 
+  INPUT:
     persona: Current Persona object
-  Output: 
-    True if we are running a new reflection. 
-    False otherwise. 
+  Output:
+    True if we are running a new reflection.
+    False otherwise.
   """
-  print (persona.scratch.name, "persona.scratch.importance_trigger_curr::", persona.scratch.importance_trigger_curr)
-  print (persona.scratch.importance_trigger_max)
+  if debug:
+    print (persona.scratch.name, "persona.scratch.importance_trigger_curr::", persona.scratch.importance_trigger_curr)
+    print (persona.scratch.importance_trigger_max)
 
   if (persona.scratch.importance_trigger_curr <= 0 and 
       [] != persona.a_mem.seq_event + persona.a_mem.seq_thought): 
@@ -221,7 +224,7 @@ def reflect(persona):
       s, p, o = generate_action_event_triple(planning_thought, persona)
       keywords = set([s, p, o])
       thought_poignancy = generate_poig_score(persona, "thought", planning_thought)
-      thought_embedding_pair = (planning_thought, get_embedding(planning_thought))
+      thought_embedding_pair = (planning_thought, get_embedding(planning_thought, persona=persona))
 
       persona.a_mem.add_thought(created, expiration, s, p, o, 
                                 planning_thought, keywords, thought_poignancy, 
@@ -237,7 +240,7 @@ def reflect(persona):
       s, p, o = generate_action_event_triple(memo_thought, persona)
       keywords = set([s, p, o])
       thought_poignancy = generate_poig_score(persona, "thought", memo_thought)
-      thought_embedding_pair = (memo_thought, get_embedding(memo_thought))
+      thought_embedding_pair = (memo_thought, get_embedding(memo_thought, persona=persona))
 
       persona.a_mem.add_thought(created, expiration, s, p, o, 
                                 memo_thought, keywords, thought_poignancy, 

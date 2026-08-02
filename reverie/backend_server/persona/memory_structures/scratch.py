@@ -5,11 +5,11 @@ File: scratch.py
 Description: Defines the short-term memory module for generative agents.
 """
 import datetime
-import json
 import sys
 sys.path.append('../../')
 
 from global_methods import *
+from durability import atomic_write_json, read_json_checked
 
 class Scratch: 
   def __init__(self, f_saved): 
@@ -147,10 +147,7 @@ class Scratch:
     self.chatting_with_buffer = dict()
     self.chatting_end_time = None
 
-    # LLM CONFIGURATION (per-persona model overrides)
-    # <llm_provider> optional override: "openai" or "openrouter"
     self.llm_provider = None
-    # <llm_model> optional override: e.g. "gpt-4o" or "anthropic/claude-3.5-sonnet"
     self.llm_model = None
 
     # <path_set> is True if we've already calculated the path the persona will
@@ -164,9 +161,9 @@ class Scratch:
     # e.g., [(50, 10), (49, 10), (48, 10), ...]
     self.planned_path = []
 
-    if check_if_file_exists(f_saved): 
+    if os.path.lexists(f_saved):
       # If we have a bootstrap file, load that here. 
-      scratch_load = json.load(open(f_saved))
+      scratch_load = read_json_checked(f_saved)
 
       self.vision_r = scratch_load["vision_r"]
       self.att_bandwidth = scratch_load["att_bandwidth"]
@@ -216,7 +213,7 @@ class Scratch:
                                               scratch_load["act_start_time"],
                                               "%B %d, %Y, %H:%M:%S")
       else: 
-        self.curr_time = None
+        self.act_start_time = None
       self.act_duration = scratch_load["act_duration"]
       self.act_description = scratch_load["act_description"]
       self.act_pronunciatio = scratch_load["act_pronunciatio"]
@@ -257,7 +254,10 @@ class Scratch:
     scratch["att_bandwidth"] = self.att_bandwidth
     scratch["retention"] = self.retention
 
-    scratch["curr_time"] = self.curr_time.strftime("%B %d, %Y, %H:%M:%S")
+    if self.curr_time:
+      scratch["curr_time"] = self.curr_time.strftime("%B %d, %Y, %H:%M:%S")
+    else:
+      scratch["curr_time"] = None
     scratch["curr_tile"] = self.curr_tile
     scratch["daily_plan_req"] = self.daily_plan_req
 
@@ -292,8 +292,11 @@ class Scratch:
     scratch["f_daily_schedule_hourly_org"] = self.f_daily_schedule_hourly_org
 
     scratch["act_address"] = self.act_address
-    scratch["act_start_time"] = (self.act_start_time
-                                     .strftime("%B %d, %Y, %H:%M:%S"))
+    if self.act_start_time:
+      scratch["act_start_time"] = self.act_start_time.strftime(
+        "%B %d, %Y, %H:%M:%S")
+    else:
+      scratch["act_start_time"] = None
     scratch["act_duration"] = self.act_duration
     scratch["act_description"] = self.act_description
     scratch["act_pronunciatio"] = self.act_pronunciatio
@@ -317,8 +320,7 @@ class Scratch:
     scratch["act_path_set"] = self.act_path_set
     scratch["planned_path"] = self.planned_path
 
-    with open(out_json, "w") as outfile:
-      json.dump(scratch, outfile, indent=2) 
+    atomic_write_json(out_json, scratch, indent=2)
 
 
   def get_f_daily_schedule_index(self, advance=0):

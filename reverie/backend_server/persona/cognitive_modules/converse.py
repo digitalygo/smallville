@@ -11,6 +11,7 @@ import random
 sys.path.append('../')
 
 from global_methods import *
+from utils import LLMProviderError
 
 from persona.memory_structures.spatial_memory import *
 from persona.memory_structures.associative_memory import *
@@ -34,6 +35,8 @@ def generate_agent_chat_summarize_ideas(init_persona,
     summarized_idea = run_gpt_prompt_agent_chat_summarize_ideas(init_persona,
                         target_persona, all_embedding_key_str, 
                         curr_context)[0]
+  except LLMProviderError:
+    raise
   except:
     summarized_idea = ""
   return summarized_idea
@@ -62,7 +65,7 @@ def generate_agent_chat(maze,
                         curr_context, 
                         init_summ_idea, 
                         target_summ_idea,
-                        verbose=False): 
+                        verbose=False):
   summarized_idea = run_gpt_prompt_agent_chat(maze, 
                                               init_persona, 
                                               target_persona,
@@ -70,12 +73,12 @@ def generate_agent_chat(maze,
                                               init_summ_idea, 
                                               target_summ_idea)[0]
   if debug or verbose:
-    for i in summarized_idea: 
+    for i in summarized_idea:
       print (i)
   return summarized_idea
 
 
-def agent_chat_v1(maze, init_persona, target_persona, verbose=False): 
+def agent_chat_v1(maze, init_persona, target_persona, verbose=False):
   # Chat version optimized for speed via batch generation
   curr_context = (f"{init_persona.scratch.name} " + 
               f"was {init_persona.scratch.act_description} " + 
@@ -106,7 +109,7 @@ def agent_chat_v1(maze, init_persona, target_persona, verbose=False):
                       verbose=verbose)
 
 
-def generate_one_utterance(maze, init_persona, target_persona, retrieved, curr_chat, verbose=False): 
+def generate_one_utterance(maze, init_persona, target_persona, retrieved, curr_chat, verbose=False):
   # Chat version optimized for speed via batch generation
   curr_context = (f"{init_persona.scratch.name} " + 
               f"was {init_persona.scratch.act_description} " + 
@@ -128,7 +131,7 @@ def generate_one_utterance(maze, init_persona, target_persona, retrieved, curr_c
 
   return x["utterance"], x["end"]
 
-def agent_chat_v2(maze, init_persona, target_persona, verbose=False): 
+def agent_chat_v2(maze, init_persona, target_persona, verbose=False):
   curr_chat = []
   if debug or verbose:
     print ("July 23")
@@ -181,7 +184,7 @@ def agent_chat_v2(maze, init_persona, target_persona, verbose=False):
 
   if debug or verbose:
     print ("July 23 PU")
-    for row in curr_chat: 
+    for row in curr_chat:
       print (row)
     print ("July 23 FIN")
 
@@ -257,13 +260,13 @@ def load_history_via_whisper(personas, whispers):
     s, p, o = generate_action_event_triple(thought, persona)
     keywords = set([s, p, o])
     thought_poignancy = generate_poig_score(persona, "event", whisper)
-    thought_embedding_pair = (thought, get_embedding(thought))
-    persona.a_mem.add_thought(created, expiration, s, p, o, 
-                              thought, keywords, thought_poignancy, 
+    thought_embedding_pair = (thought, get_embedding(thought, persona=persona))
+    persona.a_mem.add_thought(created, expiration, s, p, o,
+                              thought, keywords, thought_poignancy,
                               thought_embedding_pair, None)
 
 
-def open_convo_session(persona, convo_mode): 
+def open_convo_session(persona, convo_mode):
   if convo_mode == "analysis": 
     curr_convo = []
     interlocutor_desc = "Interviewer"
@@ -294,9 +297,9 @@ def open_convo_session(persona, convo_mode):
     s, p, o = generate_action_event_triple(thought, persona)
     keywords = set([s, p, o])
     thought_poignancy = generate_poig_score(persona, "event", whisper)
-    thought_embedding_pair = (thought, get_embedding(thought))
-    persona.a_mem.add_thought(created, expiration, s, p, o, 
-                              thought, keywords, thought_poignancy, 
+    thought_embedding_pair = (thought, get_embedding(thought, persona=persona))
+    persona.a_mem.add_thought(created, expiration, s, p, o,
+                              thought, keywords, thought_poignancy,
                               thought_embedding_pair, None)
 
 

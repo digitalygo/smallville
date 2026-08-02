@@ -3,6 +3,9 @@ Author: Joon Sung Park (joonspk@stanford.edu)
 
 File: test.py
 Description: Test script for the GPT wrapper functions.
+
+Importing this module is side-effect free: the live LLM call only runs
+when the file is executed directly (``python test.py``), never on import.
 """
 import json
 import random
@@ -36,4 +39,11 @@ Example output json:
 {"output": "[["Jane Doe", "Hi!"], ["John Doe", "Hello there!"] ... ]"}
 """
 
-print(ChatGPT_request(prompt))
+
+def run():
+    """Execute the live LLM self-test.  Only called when run directly."""
+    print(ChatGPT_request(prompt))
+
+
+if __name__ == "__main__":
+    run()

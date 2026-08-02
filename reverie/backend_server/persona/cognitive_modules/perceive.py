@@ -141,7 +141,7 @@ def perceive(persona, maze):
       if desc_embedding_in in persona.a_mem.embeddings: 
         event_embedding = persona.a_mem.embeddings[desc_embedding_in]
       else: 
-        event_embedding = get_embedding(desc_embedding_in)
+        event_embedding = get_embedding(desc_embedding_in, persona=persona)
       event_embedding_pair = (desc_embedding_in, event_embedding)
       
       # Get event poignancy. 
@@ -159,7 +159,7 @@ def perceive(persona, maze):
                              persona.scratch.act_description]
         else: 
           chat_embedding = get_embedding(persona.scratch
-                                                .act_description)
+                                                .act_description, persona=persona)
         chat_embedding_pair = (persona.scratch.act_description, 
                                chat_embedding)
         chat_poignancy = generate_poig_score(persona, "chat", 

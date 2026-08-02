@@ -21,7 +21,8 @@ class Maze:
     self.maze_name = maze_name
     # Reading in the meta information about the world. If you want tp see the
     # example variables, check out the maze_meta_info.json file. 
-    meta_info = json.load(open(f"{env_matrix}/maze_meta_info.json"))
+    with open(f"{env_matrix}/maze_meta_info.json", encoding="utf-8") as json_file:
+      meta_info = json.load(json_file)
     # <maze_width> and <maze_height> denote the number of tiles make up the 
     # height and width of the map. 
     self.maze_width = int(meta_info["maze_width"])

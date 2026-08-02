@@ -5,18 +5,18 @@ File: spatial_memory.py
 Description: Defines the MemoryTree class that serves as the agents' spatial
 memory that aids in grounding their behavior in the game world. 
 """
-import json
 import sys
 sys.path.append('../../')
 
 from utils import *
 from global_methods import *
+from durability import atomic_write_json, read_json_checked
 
 class MemoryTree: 
   def __init__(self, f_saved): 
     self.tree = {}
-    if check_if_file_exists(f_saved): 
-      self.tree = json.load(open(f_saved))
+    if os.path.lexists(f_saved):
+      self.tree = read_json_checked(f_saved)
 
 
   def print_tree(self): 
@@ -36,8 +36,7 @@ class MemoryTree:
     
 
   def save(self, out_json):
-    with open(out_json, "w") as outfile:
-      json.dump(self.tree, outfile) 
+    atomic_write_json(out_json, self.tree, indent=None)
 
 
 

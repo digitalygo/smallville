@@ -15,14 +15,12 @@ from openai import OpenAI
 
 from utils import *
 
-# ---------------------------------------------------------------------------
-# Provider client cache  (lazy, keyed by provider name)
-# ---------------------------------------------------------------------------
 _clients: dict[str, OpenAI] = {}
 
 
 def _get_client(provider: str) -> OpenAI:
     """Return (and cache) an OpenAI-compatible client for the given provider."""
+    _validate_provider(provider)
     if provider in _clients:
         return _clients[provider]
 
@@ -30,6 +28,8 @@ def _get_client(provider: str) -> OpenAI:
         client = OpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=openrouter_api_key,
+            timeout=llm_api_timeout_seconds,
+            max_retries=0,
             default_headers={
                 "HTTP-Referer": openrouter_referer,
                 "X-Title": openrouter_title,
@@ -38,18 +38,16 @@ def _get_client(provider: str) -> OpenAI:
             },
         )
     else:
-        client = OpenAI(api_key=openai_api_key)
+        client = OpenAI(
+            api_key=openai_api_key,
+            timeout=llm_api_timeout_seconds,
+            max_retries=0,
+        )
 
     _clients[provider] = client
     return client
 
 
-# ---------------------------------------------------------------------------
-# Model resolution for a given persona
-#   Priority: persona.scratch fields > LLM_PERSONA_MODELS env map > env defaults
-# ---------------------------------------------------------------------------
-
-# Sensible defaults per provider when no explicit model is configured.
 _DEFAULT_MODELS: dict[str, str] = {
     "openai": "gpt-4o",
     "openrouter": "openai/gpt-4o",
@@ -75,7 +73,6 @@ def _resolve_model(persona=None, fallback_engine: str | None = None):
     provider = llm_provider
     model = llm_model
 
-    # 1. Check persona scratch fields  (highest priority)
     has_scratch_provider = False
     has_scratch_model = False
     if persona is not None:
@@ -89,13 +86,10 @@ def _resolve_model(persona=None, fallback_engine: str | None = None):
                 model = ps.llm_model
                 has_scratch_model = True
 
-    # 2. Check per-persona env override map  (only for fields scratch left unset)
     if persona is not None and llm_persona_models:
         name = getattr(persona.scratch, "name", None) if hasattr(persona, "scratch") else None
         if name and name in llm_persona_models:
             raw = llm_persona_models[name]
-            # Only treat known provider prefixes as explicit provider:model splits.
-            # Bare model slugs containing ":" (e.g. "openai/gpt-4o") stay intact.
             for known_prefix in ("openai:", "openrouter:"):
                 if raw.startswith(known_prefix):
                     if not has_scratch_provider:
@@ -104,77 +98,90 @@ def _resolve_model(persona=None, fallback_engine: str | None = None):
                         model = raw[len(known_prefix):]
                     break
             else:
-                # No known prefix -- treat the whole value as a model name
                 if not has_scratch_model:
                     model = raw
 
-    # 3. Fail closed on the resolved provider before any API call
     _validate_provider(provider)
 
-    # 4. Fallback to provider default
     if model is None:
         model = _DEFAULT_MODELS.get(provider, "gpt-4o")
 
     return provider, model
 
 
-# ---------------------------------------------------------------------------
-# Rate-limit helper
-# ---------------------------------------------------------------------------
-
 def temp_sleep(seconds=0.1):
     time.sleep(seconds)
 
 
-# ============================================================================
-#  SECTION 1: CHAT-COMPLETIONS  (ChatGPT / GPT-4 / OpenRouter)
-# ============================================================================
+def _call_with_retries(provider, operation, func):
+    """Run ``func`` with bounded exponential retries.
+
+    ``LLM_API_RETRIES`` controls the number of retries after the initial
+    attempt; backoff starts at ``LLM_API_RETRY_BASE_SECONDS`` and doubles per
+    retry. Ordinary provider and network exceptions are retried, while
+    ``KeyboardInterrupt`` and ``SystemExit`` always propagate immediately.
+    After exhaustion a sanitized ``LLMProviderError`` names the provider,
+    operation, and total attempt count without any prompt, key, or response
+    body.
+    """
+    total_attempts = llm_api_retries + 1
+    last_exception = None
+    for attempt in range(total_attempts):
+        try:
+            return func()
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as exc:
+            last_exception = exc
+            if attempt < total_attempts - 1:
+                temp_sleep(llm_api_retry_base_seconds * (2 ** attempt))
+    raise LLMProviderError(
+        provider=provider, operation=operation, attempts=total_attempts
+    ) from last_exception
+
 
 def ChatGPT_single_request(prompt, persona=None):
     temp_sleep()
     provider, model = _resolve_model(persona)
     client = _get_client(provider)
-
-    try:
-        completion = client.chat.completions.create(
+    completion = _call_with_retries(
+        provider,
+        "chat",
+        lambda: client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
-        )
-        return completion.choices[0].message.content
-    except Exception:
-        print("ChatGPT ERROR")
-        return "ChatGPT ERROR"
+        ),
+    )
+    return completion.choices[0].message.content
 
 
 def GPT4_request(prompt, persona=None):
     temp_sleep()
     provider, model = _resolve_model(persona)
     client = _get_client(provider)
-
-    try:
-        completion = client.chat.completions.create(
+    completion = _call_with_retries(
+        provider,
+        "chat",
+        lambda: client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
-        )
-        return completion.choices[0].message.content
-    except Exception:
-        print("ChatGPT ERROR")
-        return "ChatGPT ERROR"
+        ),
+    )
+    return completion.choices[0].message.content
 
 
 def ChatGPT_request(prompt, persona=None):
     provider, model = _resolve_model(persona)
     client = _get_client(provider)
-
-    try:
-        completion = client.chat.completions.create(
+    completion = _call_with_retries(
+        provider,
+        "chat",
+        lambda: client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
-        )
-        return completion.choices[0].message.content
-    except Exception:
-        print("ChatGPT ERROR")
-        return "ChatGPT ERROR"
+        ),
+    )
+    return completion.choices[0].message.content
 
 
 def GPT4_safe_generate_response(
@@ -212,6 +219,8 @@ def GPT4_safe_generate_response(
                 print(curr_gpt_response)
                 print("~~~~")
 
+        except LLMProviderError:
+            raise
         except Exception:
             pass
 
@@ -253,6 +262,8 @@ def ChatGPT_safe_generate_response(
                 print(curr_gpt_response)
                 print("~~~~")
 
+        except LLMProviderError:
+            raise
         except Exception:
             pass
 
@@ -282,16 +293,14 @@ def ChatGPT_safe_generate_response_OLD(
                 print(curr_gpt_response)
                 print("~~~~")
 
+        except LLMProviderError:
+            raise
         except Exception:
             pass
 
     print("FAIL SAFE TRIGGERED")
     return fail_safe_response
 
-
-# ============================================================================
-#  SECTION 2: LEGACY GPT-3 COMPLETIONS  (normalized to chat)
-# ============================================================================
 
 def GPT_request(prompt, gpt_parameter, persona=None):
     """Legacy completion-style request normalized to chat completions.
@@ -303,7 +312,6 @@ def GPT_request(prompt, gpt_parameter, persona=None):
     provider, model = _resolve_model(persona, fallback_engine=gpt_parameter.get("engine"))
     client = _get_client(provider)
 
-    # Build chat messages from the raw prompt
     system_prompt = (
         "You are a helpful assistant. Always respond exactly as instructed. "
         "Output only the requested text with no extra commentary."
@@ -313,7 +321,6 @@ def GPT_request(prompt, gpt_parameter, persona=None):
         {"role": "user", "content": prompt},
     ]
 
-    # Map completion parameters to chat-completions parameters
     kwargs: dict = {
         "model": model,
         "messages": messages,
@@ -326,7 +333,6 @@ def GPT_request(prompt, gpt_parameter, persona=None):
     if stop_seq and stop_seq != [""]:
         kwargs["stop"] = stop_seq
 
-    # frequency_penalty / presence_penalty only for models that support them
     fp = gpt_parameter.get("frequency_penalty")
     if fp is not None:
         kwargs["frequency_penalty"] = fp
@@ -334,12 +340,12 @@ def GPT_request(prompt, gpt_parameter, persona=None):
     if pp is not None:
         kwargs["presence_penalty"] = pp
 
-    try:
-        completion = client.chat.completions.create(**kwargs)
-        return completion.choices[0].message.content
-    except Exception:
-        print("TOKEN LIMIT EXCEEDED")
-        return "TOKEN LIMIT EXCEEDED"
+    completion = _call_with_retries(
+        provider,
+        "chat",
+        lambda: client.chat.completions.create(**kwargs),
+    )
+    return completion.choices[0].message.content
 
 
 def generate_prompt(curr_input, prompt_lib_file):
@@ -381,38 +387,51 @@ def safe_generate_response(
     return fail_safe_response
 
 
-# ============================================================================
-#  SECTION 3: EMBEDDINGS
-# ============================================================================
-
-# ---------------------------------------------------------------------------
-# Embedding model defaults per provider
-# ---------------------------------------------------------------------------
 _EMBEDDING_MODELS: dict[str, str] = {
     "openai": "text-embedding-ada-002",
     "openrouter": "openai/text-embedding-ada-002",
 }
 
 
+def _resolve_embedding_model(provider: str, explicit: str | None = None) -> str:
+    """Resolve the embedding model for ``provider``.
+
+    Precedence: explicit argument > per-provider ``LLM_EMBEDDING_MODELS``
+    > global ``LLM_EMBEDDING_MODEL`` > provider-safe default.
+
+    The chat model (``LLM_MODEL``) is never reused as an embedding model.
+    """
+    if explicit:
+        return explicit
+    if provider in llm_embedding_models:
+        return llm_embedding_models[provider]
+    if llm_embedding_model:
+        return llm_embedding_model
+    return _EMBEDDING_MODELS.get(provider, "text-embedding-ada-002")
+
+
 def get_embedding(text, model=None, persona=None):
     """Return embedding vector for ``text``.
 
-    If ``model`` is not explicitly set, a provider-appropriate default
-    is selected (e.g. ``openai/text-embedding-ada-002`` for OpenRouter).
+    If ``model`` is not explicitly set, the embedding model is resolved
+    from per-provider ``LLM_EMBEDDING_MODELS``, then global
+    ``LLM_EMBEDDING_MODEL``, then a provider-appropriate safe default
+    (e.g. ``openai/text-embedding-ada-002`` for OpenRouter). The chat
+    model is never used for embeddings.
     """
     text = text.replace("\n", " ")
     if not text:
         text = "this is blank"
     provider, _ = _resolve_model(persona)
-    if model is None:
-        model = _EMBEDDING_MODELS.get(provider, "text-embedding-ada-002")
+    model = _resolve_embedding_model(provider, explicit=model)
     client = _get_client(provider)
-    return client.embeddings.create(input=[text], model=model).data[0].embedding
+    response = _call_with_retries(
+        provider,
+        "embedding",
+        lambda: client.embeddings.create(input=[text], model=model),
+    )
+    return response.data[0].embedding
 
-
-# ============================================================================
-#  SECTION 4: SELF-TEST
-# ============================================================================
 
 if __name__ == "__main__":
     gpt_parameter = {

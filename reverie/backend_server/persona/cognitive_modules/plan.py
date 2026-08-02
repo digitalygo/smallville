@@ -12,6 +12,7 @@ import time
 sys.path.append('../../')
 
 from global_methods import *
+from utils import LLMProviderError
 from persona.prompt_template.run_gpt_prompt import *
 from persona.cognitive_modules.retrieve import *
 from persona.cognitive_modules.converse import *
@@ -241,6 +242,8 @@ def generate_action_pronunciatio(act_desp, persona):
   if debug: print ("GNS FUNCTION: <generate_action_pronunciatio>")
   try: 
     x = run_gpt_prompt_pronunciatio(act_desp, persona)[0]
+  except LLMProviderError:
+    raise
   except: 
     x = "🙂"
 
@@ -507,7 +510,7 @@ def _long_term_planning(persona, new_day):
   s, p, o = (persona.scratch.name, "plan", persona.scratch.curr_time.strftime('%A %B %d'))
   keywords = set(["plan"])
   thought_poignancy = 5
-  thought_embedding_pair = (thought, get_embedding(thought))
+  thought_embedding_pair = (thought, get_embedding(thought, persona=persona))
   persona.a_mem.add_thought(created, expiration, s, p, o, 
                             thought, keywords, thought_poignancy, 
                             thought_embedding_pair, None)

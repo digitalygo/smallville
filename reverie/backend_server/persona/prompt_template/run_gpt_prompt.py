@@ -259,7 +259,7 @@ def run_gpt_prompt_generate_hourly_schedule(persona,
   # special_instruction = "The output should ONLY include the part of the sentence that completes the last line in the schedule above." ########
   # fail_safe = get_fail_safe() ########
   # output = ChatGPT_safe_generate_response(prompt, example_output, special_instruction, 3, fail_safe,
-  #                                         __chat_func_validate, __chat_func_clean_up, verbose, persona=persona)
+  #                                         __chat_func_validate, __chat_func_clean_up, True)
   # if output != False: 
   #   return output, [output, prompt, gpt_param, prompt_input, fail_safe]
   # # ChatGPT Plugin ===========================================================
@@ -455,8 +455,6 @@ def run_gpt_prompt_task_decomp(persona,
 
   if debug or verbose:
       print ("IMPORTANT VVV DEBUG")
-      # print (prompt_input)
-      # print (prompt)
       print (output)
 
   fin_output = []
@@ -597,7 +595,7 @@ def run_gpt_prompt_action_sector(action_description,
   # special_instruction = "The value for the output must contain one of the area options above verbatim (including lower/upper case)." ########
   # fail_safe = get_fail_safe() ########
   # output = ChatGPT_safe_generate_response(prompt, example_output, special_instruction, 3, fail_safe,
-  #                                         __chat_func_validate, __chat_func_clean_up, verbose, persona=persona)
+  #                                         __chat_func_validate, __chat_func_clean_up, True)
   # if output != False: 
   #   return output, [output, prompt, gpt_param, prompt_input, fail_safe]
   # # ChatGPT Plugin ===========================================================
@@ -861,7 +859,7 @@ def run_gpt_prompt_pronunciatio(action_description, persona, verbose=False):
 
   # fail_safe = get_fail_safe()
   # output = safe_generate_response(prompt, gpt_param, 5, fail_safe,
-  #                                  __func_validate, __func_clean_up, persona=persona)
+  #                                  __func_validate, __func_clean_up)
 
   # if debug or verbose: 
   #   print_run_prompts(prompt_template, persona, gpt_param, 
@@ -932,7 +930,7 @@ def run_gpt_prompt_event_triple(action_description, persona, verbose=False):
   # special_instruction = "The value for the output must ONLY contain the triple. If there is an incomplete element, just say 'None' but there needs to be three elements no matter what." ########
   # fail_safe = get_fail_safe(persona) ########
   # output = ChatGPT_safe_generate_response(prompt, example_output, special_instruction, 3, fail_safe,
-  #                                         __chat_func_validate, __chat_func_clean_up, verbose, persona=persona)
+  #                                         __chat_func_validate, __chat_func_clean_up, True)
   # if output != False: 
   #   return output, [output, prompt, gpt_param, prompt_input, fail_safe]
   # ChatGPT Plugin ===========================================================
@@ -1034,7 +1032,7 @@ def run_gpt_prompt_act_obj_desc(act_game_object, act_desp, persona, verbose=Fals
   # prompt = generate_prompt(prompt_input, prompt_template)
   # fail_safe = get_fail_safe(act_game_object)
   # output = safe_generate_response(prompt, gpt_param, 5, fail_safe,
-  #                                  __func_validate, __func_clean_up, persona=persona)
+  #                                  __func_validate, __func_clean_up)
 
   # if debug or verbose: 
   #   print_run_prompts(prompt_template, persona, gpt_param, 
@@ -1660,7 +1658,7 @@ def run_gpt_prompt_summarize_conversation(persona, conversation, test_input=None
 
   # fail_safe = get_fail_safe()
   # output = safe_generate_response(prompt, gpt_param, 5, fail_safe,
-  #                                  __func_validate, __func_clean_up, persona=persona)
+  #                                  __func_validate, __func_clean_up)
 
   # if debug or verbose: 
   #   print_run_prompts(prompt_template, persona, gpt_param, 
@@ -1918,7 +1916,7 @@ def run_gpt_prompt_event_poignancy(persona, event_description, test_input=None, 
 
   # fail_safe = get_fail_safe()
   # output = safe_generate_response(prompt, gpt_param, 5, fail_safe,
-  #                                  __func_validate, __func_clean_up, persona=persona)
+  #                                  __func_validate, __func_clean_up)
 
   # if debug or verbose: 
   #   print_run_prompts(prompt_template, persona, gpt_param, 
@@ -1989,7 +1987,7 @@ def run_gpt_prompt_thought_poignancy(persona, event_description, test_input=None
 
   # fail_safe = get_fail_safe()
   # output = safe_generate_response(prompt, gpt_param, 5, fail_safe,
-  #                                  __func_validate, __func_clean_up, persona=persona)
+  #                                  __func_validate, __func_clean_up)
 
   # if debug or verbose: 
   #   print_run_prompts(prompt_template, persona, gpt_param, 
@@ -2063,7 +2061,7 @@ def run_gpt_prompt_chat_poignancy(persona, event_description, test_input=None, v
 
   # fail_safe = get_fail_safe()
   # output = safe_generate_response(prompt, gpt_param, 5, fail_safe,
-  #                                  __func_validate, __func_clean_up, persona=persona)
+  #                                  __func_validate, __func_clean_up)
 
   # if debug or verbose: 
   #   print_run_prompts(prompt_template, persona, gpt_param, 
@@ -2267,7 +2265,7 @@ def run_gpt_prompt_agent_chat_summarize_ideas(persona, target_persona, statement
 
   # fail_safe = get_fail_safe()
   # output = safe_generate_response(prompt, gpt_param, 5, fail_safe,
-  #                                  __func_validate, __func_clean_up, persona=persona)
+  #                                  __func_validate, __func_clean_up)
 
   # if debug or verbose: 
   #   print_run_prompts(prompt_template, persona, gpt_param, 
@@ -2335,7 +2333,7 @@ def run_gpt_prompt_agent_chat_summarize_relationship(persona, target_persona, st
 
   # fail_safe = get_fail_safe()
   # output = safe_generate_response(prompt, gpt_param, 5, fail_safe,
-  #                                  __func_validate, __func_clean_up, persona=persona)
+  #                                  __func_validate, __func_clean_up)
 
   # if debug or verbose: 
   #   print_run_prompts(prompt_template, persona, gpt_param, 
@@ -2431,7 +2429,7 @@ def run_gpt_prompt_agent_chat(maze, persona, target_persona,
 
     if debug or verbose:
         print ("a;dnfdap98fh4p9enf HEREE!!!")
-        for row in gpt_response: 
+        for row in gpt_response:
             print (row)
 
     return gpt_response
@@ -2471,7 +2469,7 @@ def run_gpt_prompt_agent_chat(maze, persona, target_persona,
 
   # fail_safe = get_fail_safe()
   # output = safe_generate_response(prompt, gpt_param, 5, fail_safe,
-  #                                  __func_validate, __func_clean_up, persona=persona)
+  #                                  __func_validate, __func_clean_up)
 
   # if debug or verbose: 
   #   print_run_prompts(prompt_template, persona, gpt_param, 
@@ -2548,7 +2546,7 @@ def run_gpt_prompt_summarize_ideas(persona, statements, question, test_input=Non
 
   # fail_safe = get_fail_safe()
   # output = safe_generate_response(prompt, gpt_param, 5, fail_safe,
-  #                                  __func_validate, __func_clean_up, persona=persona)
+  #                                  __func_validate, __func_clean_up)
 
   # if debug or verbose: 
   #   print_run_prompts(prompt_template, persona, gpt_param, 
@@ -2607,7 +2605,7 @@ def run_gpt_prompt_generate_next_convo_line(persona, interlocutor_desc, prev_con
   # special_instruction = 'The output should be a string that responds to the question. Again, only use the context included in the "Note" to generate the response' ########
   # fail_safe = get_fail_safe() ########
   # output = ChatGPT_safe_generate_response(prompt, example_output, special_instruction, 3, fail_safe,
-  #                                         __chat_func_validate, __chat_func_clean_up, verbose, persona=persona)
+  #                                         __chat_func_validate, __chat_func_clean_up, True)
   # if output != False: 
   #   return output, [output, prompt, gpt_param, prompt_input, fail_safe]
   # # ChatGPT Plugin ===========================================================

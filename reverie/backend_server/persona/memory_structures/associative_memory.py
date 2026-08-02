@@ -10,10 +10,11 @@ agents paper.
 import sys
 sys.path.append('../../')
 
-import json
 import datetime
+import os
 
 from global_methods import *
+from durability import atomic_write_json, read_json_checked
 
 
 class ConceptNode: 
@@ -62,9 +63,9 @@ class AssociativeMemory:
     self.kw_strength_event = dict()
     self.kw_strength_thought = dict()
 
-    self.embeddings = json.load(open(f_saved + "/embeddings.json"))
+    self.embeddings = read_json_checked(f_saved + "/embeddings.json")
 
-    nodes_load = json.load(open(f_saved + "/nodes.json"))
+    nodes_load = read_json_checked(f_saved + "/nodes.json")
     for count in range(len(nodes_load.keys())): 
       node_id = f"node_{str(count+1)}"
       node_details = nodes_load[node_id]
@@ -102,7 +103,7 @@ class AssociativeMemory:
         self.add_thought(created, expiration, s, p, o, 
                    description, keywords, poignancy, embedding_pair, filling)
 
-    kw_strength_load = json.load(open(f_saved + "/kw_strength.json"))
+    kw_strength_load = read_json_checked(f_saved + "/kw_strength.json")
     if kw_strength_load["kw_strength_event"]: 
       self.kw_strength_event = kw_strength_load["kw_strength_event"]
     if kw_strength_load["kw_strength_thought"]: 
@@ -137,17 +138,15 @@ class AssociativeMemory:
       r[node_id]["keywords"] = list(node.keywords)
       r[node_id]["filling"] = node.filling
 
-    with open(out_json+"/nodes.json", "w") as outfile:
-      json.dump(r, outfile)
+    os.makedirs(out_json, exist_ok=True)
+    atomic_write_json(out_json + "/nodes.json", r, indent=None)
 
     r = dict()
     r["kw_strength_event"] = self.kw_strength_event
     r["kw_strength_thought"] = self.kw_strength_thought
-    with open(out_json+"/kw_strength.json", "w") as outfile:
-      json.dump(r, outfile)
+    atomic_write_json(out_json + "/kw_strength.json", r, indent=None)
 
-    with open(out_json+"/embeddings.json", "w") as outfile:
-      json.dump(self.embeddings, outfile)
+    atomic_write_json(out_json + "/embeddings.json", self.embeddings, indent=None)
 
 
   def add_event(self, created, expiration, s, p, o, 
