@@ -1,8 +1,8 @@
-# Frontend server runtime storage
 environment/frontend_server/temp_storage/
 
-# Ad-hoc simulation folders (e.g. tmp_resume_smoke)
-environment/frontend_server/storage/tmp*
+environment/frontend_server/storage/*
+!environment/frontend_server/storage/base_the_ville_isabella_maria_klaus/
+!environment/frontend_server/storage/base_the_ville_n25/
 
 bin/
 include/
@@ -63,6 +63,7 @@ coverage.xml
 # Django stuff:
 *.log
 local_settings.py
+*.sqlite3
 
 # Flask stuff:
 instance/
@@ -86,12 +87,11 @@ target/
 # celery beat schedule file
 celerybeat-schedule
 
-# dotenv — all .env variants except the documented example
+# dotenv
 .env
 .env.*
 !.env.example
 
-# uv
 .venv/
 
 # virtualenv
@@ -104,5 +104,4 @@ ENV/
 # Rope project settings
 .ropeproject
 
-# Mycelium status records  (workspace snapshots stay untracked)
 substrate/traces/status/

@@ -1,0 +1,7 @@
+FROM postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+
+RUN rm -f /usr/local/bin/gosu /usr/local/bin/su-exec
+
+USER 70:70
+
+HEALTHCHECK --interval=10s --timeout=5s --retries=5 --start-period=10s CMD PGPASSWORD="$POSTGRES_PASSWORD" psql -h "$(hostname -i)" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "SELECT 1" >/dev/null 2>&1

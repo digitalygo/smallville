@@ -1,4 +1,3 @@
-# Python artifacts
 .venv/
 venv/
 __pycache__/
@@ -10,51 +9,42 @@ __pycache__/
 dist/
 build/
 
-# Environment
 .env
 .env.*
 !.env.example
 
-# Git
 .git/
 .gitignore
 .gitattributes
 
-# IDE and editor
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# OS
 .DS_Store
 Thumbs.db
 
-# Tests and coverage
 htmlcov/
 .coverage
 .coverage.*
 .cache
 .pytest_cache/
 
-# SQLite databases (use PostgreSQL in production)
 *.sqlite3
 
-# Runtime data — mounted at runtime, huge (storage/ alone is 1.1 GiB)
-environment/frontend_server/storage/
 environment/frontend_server/temp_storage/
-environment/frontend_server/compressed_storage/
+environment/frontend_server/storage/*
+!environment/frontend_server/storage/base_the_ville_isabella_maria_klaus
+!environment/frontend_server/storage/base_the_ville_n25
 environment/static_root/
 environment/media_root/
 
-# Logs
 *.log
 
-# Docker
 .dockerignore
-Dockerfile
+Dockerfile*
 docker-compose*.yml
 
-# Documentation
 README.md
 LICENSE

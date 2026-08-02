@@ -1,48 +1,68 @@
-# smallville production deployment
-#
-# Start:
-#   docker compose -f docker-compose.prod.yml up -d
-#
-# Stop:
-#   docker compose -f docker-compose.prod.yml down
-#
-# Requirements:
-#   - .env file at repo root with required secrets (see .env.example)
-#   - At minimum: DJANGO_SECRET_KEY, REVERIE_SIM_CODE
-#   - For fresh fork: REVERIE_FORK_SIM_CODE
-
 services:
+  seed:
+    image: smallville:latest
+    build: .
+    container_name: smallville-seed
+    hostname: seed
+    user: "65534:65533"
+    working_dir: /app
+    command: ["/bin/sh", "/app/init_storage.sh"]
+    volumes:
+      - storage_data:/app/environment/frontend_server/storage
+    networks:
+      - internal
+    restart: "no"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    labels:
+      - "org.opencontainers.image.title=smallville-seed"
+
   web:
     image: smallville:latest
     build: .
     container_name: smallville-web
     hostname: web
-    user: "65534:65534"
+    user: "65534:65533"
     working_dir: /app/environment/frontend_server
     command: >
       sh -c "
         python manage.py migrate --noinput &&
         python manage.py collectstatic --noinput &&
-        exec gunicorn frontend_server.wsgi:application
-          --bind 0.0.0.0:8000
-          --workers 4
-          --access-logfile -
-          --error-logfile -
-          --timeout 120
+        exec gunicorn frontend_server.wsgi:application --bind 0.0.0.0:8000 --workers 4 --access-logfile - --error-logfile - --timeout 120
       "
     environment:
-      # Hardcoded production defaults — never override these
-      DJANGO_ENV: production
+      DB_HOST: db
+      DB_NAME: "${POSTGRES_DB:-smallville}"
+      DB_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
+      DB_PORT: "5432"
+      DB_USER: "${POSTGRES_USER:-smallville}"
+      DJANGO_ALLOWED_HOSTS: "${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1},web"
+      DJANGO_CSRF_TRUSTED_ORIGINS: "${DJANGO_CSRF_TRUSTED_ORIGINS:?set DJANGO_CSRF_TRUSTED_ORIGINS in .env}"
       DJANGO_DEBUG: "false"
-      # Env-driven SSL redirect. Default true (secure). Override in .env
-      # if running without a TLS-terminating reverse proxy.
-      DJANGO_SECURE_SSL_REDIRECT: "${DJANGO_SECURE_SSL_REDIRECT:-true}"
-      # Composed from .env values with defaults
-      DATABASE_URL: postgres://${POSTGRES_USER:-smallville}:${POSTGRES_PASSWORD:-smallville}@db:5432/${POSTGRES_DB:-smallville}
-    env_file:
-      - .env
+      DJANGO_ENV: production
+      DJANGO_HSTS_SECONDS: "${DJANGO_HSTS_SECONDS:-31536000}"
+      DJANGO_LOG_LEVEL: "${DJANGO_LOG_LEVEL:-WARNING}"
+      DJANGO_SECRET_KEY: "${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in .env}"
+      DJANGO_SECURE_SSL_REDIRECT: "${DJANGO_SECURE_SSL_REDIRECT:?set DJANGO_SECURE_SSL_REDIRECT in .env}"
+      LOGIN_THROTTLE_ACCOUNT_THRESHOLD: "${LOGIN_THROTTLE_ACCOUNT_THRESHOLD:-5}"
+      LOGIN_THROTTLE_BASE_DELAY_SECONDS: "${LOGIN_THROTTLE_BASE_DELAY_SECONDS:-1}"
+      LOGIN_THROTTLE_ENABLED: "${LOGIN_THROTTLE_ENABLED:-true}"
+      LOGIN_THROTTLE_FAIL_OPEN: "${LOGIN_THROTTLE_FAIL_OPEN:-false}"
+      LOGIN_THROTTLE_MAX_DELAY_SECONDS: "${LOGIN_THROTTLE_MAX_DELAY_SECONDS:-300}"
+      LOGIN_THROTTLE_SOURCE_THRESHOLD: "${LOGIN_THROTTLE_SOURCE_THRESHOLD:-20}"
+      LOGIN_THROTTLE_TRUSTED_PROXY_CIDRS: "${LOGIN_THROTTLE_TRUSTED_PROXY_CIDRS:-}"
+      LOGIN_THROTTLE_WINDOW_SECONDS: "${LOGIN_THROTTLE_WINDOW_SECONDS:-300}"
+      PYTHONDONTWRITEBYTECODE: "1"
     ports:
-      - "${WEB_PORT:-8000}:8000"
+      - "${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-8000}:8000"
     expose:
       - "8000"
     volumes:
@@ -51,17 +71,21 @@ services:
       - static_data:/app/environment/static_root
       - media_data:/app/environment/media_root
     tmpfs:
-      - /tmp:uid=65534,gid=65534
+      - /tmp:uid=65534,gid=65533
     networks:
       - internal
     depends_on:
+      backend:
+        condition: service_healthy
       db:
         condition: service_healthy
+      seed:
+        condition: service_completed_successfully
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/', timeout=5).read()\" || exit 1",
+          "python -c \"import urllib.request as u; req = u.Request('http://web:8000/health/'); req.add_header('X-Forwarded-Proto', 'https'); u.urlopen(req, timeout=5).read()\" || exit 1",
         ]
       interval: 30s
       timeout: 10s
@@ -77,8 +101,7 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    # read_only omitted: production.py uses RotatingFileHandler writing
-    # to /app/environment/django.log, which sits outside the volume mounts.
+    read_only: true
     labels:
       - "org.opencontainers.image.title=smallville-web"
 
@@ -86,36 +109,55 @@ services:
     image: smallville:latest
     container_name: smallville-backend
     hostname: backend
-    user: "65534:65534"
+    user: "65534:65533"
     working_dir: /app/reverie/backend_server
-    command: >
-      sh -c "
-        exec python reverie.py --serve --resume
-          --autosave-interval ${REVERIE_AUTOSAVE_INTERVAL:-10}
-      "
+    command:
+      - python
+      - reverie.py
+      - --serve
+      - --resume
+      - --autosave-interval
+      - "${REVERIE_AUTOSAVE_INTERVAL:-10}"
     environment:
-      REVERIE_FORK_SIM_CODE: "${REVERIE_FORK_SIM_CODE:-}"
-      REVERIE_SIM_CODE: "${REVERIE_SIM_CODE:-}"
-    env_file:
-      - .env
+      DEBUG: "${DEBUG:-false}"
+      KEY_OWNER: "${KEY_OWNER:-anonymous}"
+      LLM_API_RETRIES: "${LLM_API_RETRIES:-3}"
+      LLM_API_RETRY_BASE_SECONDS: "${LLM_API_RETRY_BASE_SECONDS:-1}"
+      LLM_API_TIMEOUT_SECONDS: "${LLM_API_TIMEOUT_SECONDS:-60}"
+      LLM_EMBEDDING_MODEL: "${LLM_EMBEDDING_MODEL:-}"
+      LLM_EMBEDDING_MODELS: "${LLM_EMBEDDING_MODELS:-}"
+      LLM_MODEL: "${LLM_MODEL:-}"
+      LLM_PERSONA_MODELS: "${LLM_PERSONA_MODELS:-}"
+      LLM_PROVIDER: "${LLM_PROVIDER:-openrouter}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      OPENROUTER_CATEGORIES: "${OPENROUTER_CATEGORIES:-game,roleplay}"
+      OPENROUTER_REFERER: "${OPENROUTER_REFERER:-https://github.com/digitalygo/smallville}"
+      OPENROUTER_TITLE: "${OPENROUTER_TITLE:-smallville}"
+      REVERIE_FORK_SIM_CODE: "${REVERIE_FORK_SIM_CODE:-base_the_ville_isabella_maria_klaus}"
+      REVERIE_SIM_CODE: "${REVERIE_SIM_CODE:?set REVERIE_SIM_CODE in .env}"
     volumes:
       - storage_data:/app/environment/frontend_server/storage
       - temp_data:/app/environment/frontend_server/temp_storage
     tmpfs:
-      - /tmp:uid=65534,gid=65534
+      - /tmp:uid=65534,gid=65533
     networks:
       - internal
+    depends_on:
+      seed:
+        condition: service_completed_successfully
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "test -f /app/environment/frontend_server/temp_storage/curr_sim_code.json || exit 1",
+          "python -c \"import json,pathlib,time; p='/app/environment/frontend_server/temp_storage/backend_heartbeat.json'; d=json.loads(pathlib.Path(p).read_text(encoding='utf-8')); assert isinstance(d,dict); t=d['timestamp']; assert isinstance(t,(int,float)) and not isinstance(t,bool); assert t-time.time()<=5; assert time.time()-t<15; assert d['sim_code']=='$$REVERIE_SIM_CODE'; assert d['pid']==1; s=d['step']; assert isinstance(s,int) and not isinstance(s,bool) and s>=0\" || exit 1",
         ]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 5s
+      start_period: 10s
     restart: unless-stopped
+    stop_grace_period: 6m
     deploy:
       resources:
         limits:
@@ -130,15 +172,18 @@ services:
       - "org.opencontainers.image.title=smallville-backend"
 
   db:
-    image: postgres:16-alpine
+    image: smallville-db:16-alpine
+    build:
+      context: .
+      dockerfile: Dockerfile.db
     container_name: smallville-db
     hostname: db
     user: "70:70"
     environment:
-      POSTGRES_USER: "${POSTGRES_USER:-smallville}"
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-smallville}"
-      POSTGRES_DB: "${POSTGRES_DB:-smallville}"
       PGDATA: /var/lib/postgresql/data/pgdata
+      POSTGRES_DB: "${POSTGRES_DB:-smallville}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
+      POSTGRES_USER: "${POSTGRES_USER:-smallville}"
     expose:
       - "5432"
     volumes:
@@ -151,7 +196,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "pg_isready -U ${POSTGRES_USER:-smallville} -d ${POSTGRES_DB:-smallville}",
+          "PGPASSWORD=\"$$POSTGRES_PASSWORD\" psql -h \"$$(hostname -i)\" -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\" -tAc \"SELECT 1\" >/dev/null 2>&1",
         ]
       interval: 10s
       timeout: 5s
