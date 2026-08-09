@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
   "aiohttp>=3.14.1",
   "dj-database-url>=2.0",
-  "Django>=5.2,<6.0",
+  "Django>=5.2.16,<6.0",
   "gunicorn>=20.1",
   "matplotlib>=3.3",
   "nltk>=3.10.0",

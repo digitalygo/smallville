@@ -61,6 +61,7 @@ services:
       LOGIN_THROTTLE_TRUSTED_PROXY_CIDRS: "${LOGIN_THROTTLE_TRUSTED_PROXY_CIDRS:-}"
       LOGIN_THROTTLE_WINDOW_SECONDS: "${LOGIN_THROTTLE_WINDOW_SECONDS:-300}"
       PYTHONDONTWRITEBYTECODE: "1"
+      SIMULATOR_TARGET_FPS: "${SIMULATOR_TARGET_FPS:-30}"
     ports:
       - "${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-8000}:8000"
     expose:
@@ -129,12 +130,14 @@ services:
       LLM_MODEL: "${LLM_MODEL:-}"
       LLM_PERSONA_MODELS: "${LLM_PERSONA_MODELS:-}"
       LLM_PROVIDER: "${LLM_PROVIDER:-openrouter}"
+      LLM_REASONING_EFFORT: "${LLM_REASONING_EFFORT:-}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
       OPENROUTER_CATEGORIES: "${OPENROUTER_CATEGORIES:-game,roleplay}"
       OPENROUTER_REFERER: "${OPENROUTER_REFERER:-https://github.com/digitalygo/smallville}"
       OPENROUTER_TITLE: "${OPENROUTER_TITLE:-smallville}"
       REVERIE_FORK_SIM_CODE: "${REVERIE_FORK_SIM_CODE:-base_the_ville_isabella_maria_klaus}"
+      REVERIE_MAX_STEPS_PER_SECOND: "${REVERIE_MAX_STEPS_PER_SECOND:-0.4}"
       REVERIE_SIM_CODE: "${REVERIE_SIM_CODE:?set REVERIE_SIM_CODE in .env}"
     volumes:
       - storage_data:/app/environment/frontend_server/storage
