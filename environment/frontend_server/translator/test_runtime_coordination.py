@@ -16,7 +16,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from django.test import TestCase, TransactionTestCase
+from django.test import TestCase, TransactionTestCase, override_settings
 from django.contrib.auth.models import User
 
 from translator import views
@@ -432,6 +432,30 @@ class HomeSavedStepSelectionTests(BackendLeaseMixin, TestCase):
             {"step": 0},
         )
 
+    def test_home_context_carries_simulator_target_fps(self):
+        self._write_env(
+            0,
+            {
+                "Isabella Rodriguez": (1, 1),
+                "Maria Lopez": (2, 2),
+                "Klaus Mueller": (3, 3),
+            },
+        )
+        self._write_handshake(0)
+        response = self.client.get("/simulator_home")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["simulator_target_fps"], 30)
+        self.assertContains(
+            response, 'id="simulator-target-fps" type="application/json">30'
+        )
+        with override_settings(SIMULATOR_TARGET_FPS=60):
+            response = self.client.get("/simulator_home")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["simulator_target_fps"], 60)
+        self.assertContains(
+            response, 'id="simulator-target-fps" type="application/json">60'
+        )
+
     def test_home_strict_malformed_current_falls_back_to_prior(self):
         self._write_env(
             0,
@@ -769,6 +793,29 @@ class HomeCheckpointAuthorityTests(BackendLeaseMixin, TestCase):
             name: {"x": x, "y": y} for name, (x, y) in self._positions().items()
         }
 
+    def _rewrite_isabella_nodes(self, node_type, filling, include_filling=True):
+        _write_complete_checkpoint(self.sim_dir, "0000000001", self._three_personas())
+        node = {
+            "type": node_type,
+            "node_count": 1,
+            "created": "2023-01-01 00:00:00",
+            "description": f"{node_type} node",
+        }
+        if include_filling:
+            node["filling"] = filling
+        if node_type == "thought":
+            node["depth"] = 1
+        nodes_path = (
+            self.checkpoints
+            / "0000000001"
+            / "personas"
+            / "Isabella Rodriguez"
+            / "bootstrap_memory"
+            / "associative_memory"
+            / "nodes.json"
+        )
+        nodes_path.write_text(json.dumps({"node_1": node}), encoding="utf-8")
+
     def test_process_environment_uses_checkpoint_personas(self):
         (self.personas_dir / "Stale Persona").mkdir(parents=True, exist_ok=True)
         _write_complete_checkpoint(self.sim_dir, "0000000001", self._three_personas())
@@ -823,6 +870,49 @@ class HomeCheckpointAuthorityTests(BackendLeaseMixin, TestCase):
         )
         self.assertEqual(response.status_code, 500)
         self.assertIn("pointer", response.json()["error"])
+        self.assertFalse((self.env_dir / "0.json").exists())
+
+    def test_process_environment_accepts_thought_filling_null(self):
+        self._rewrite_isabella_nodes("thought", None)
+        _write_runtime_markers(self.sim_code, 0)
+        environment = self._positions_env()
+        response = self.client.post(
+            "/process_environment/",
+            data=json.dumps(
+                {"step": 0, "sim_code": self.sim_code, "environment": environment}
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            json.loads((self.env_dir / "0.json").read_text(encoding="utf-8")),
+            environment,
+        )
+
+    def test_process_environment_rejects_chat_filling_null(self):
+        self._rewrite_isabella_nodes("chat", None)
+        _write_runtime_markers(self.sim_code, 0)
+        response = self.client.post(
+            "/process_environment/",
+            data=json.dumps(
+                {"step": 0, "sim_code": self.sim_code, "environment": self._positions_env()}
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 500)
+        self.assertFalse((self.env_dir / "0.json").exists())
+
+    def test_process_environment_rejects_thought_missing_filling(self):
+        self._rewrite_isabella_nodes("thought", None, include_filling=False)
+        _write_runtime_markers(self.sim_code, 0)
+        response = self.client.post(
+            "/process_environment/",
+            data=json.dumps(
+                {"step": 0, "sim_code": self.sim_code, "environment": self._positions_env()}
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 500)
         self.assertFalse((self.env_dir / "0.json").exists())
 
 

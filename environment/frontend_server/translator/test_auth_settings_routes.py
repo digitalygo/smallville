@@ -4,12 +4,15 @@ Covers auth redirects and direct login, CSRF/method handling, demo step
 limits, malformed JSON handling, the health endpoint, and the production
 settings secret/logging policy."""
 
+import importlib
 import json
+import os
 import subprocess
 import sys
 import unittest
 
 from pathlib import Path
+from unittest.mock import patch
 
 from django.test import Client, TestCase, override_settings
 from django.conf import settings
@@ -189,6 +192,42 @@ class SettingsLoaderTests(TestCase):
     def test_unset_env_defaults_to_dev(self):
         pkg = _load_settings_package({})
         self.assertFalse(pkg.DEBUG)
+
+
+class SimulatorTargetFpsSettingsTests(TestCase):
+    """SIMULATOR_TARGET_FPS parses with the positive-int contract."""
+
+    def _load_base(self, env_overrides):
+        with patch.dict(os.environ, env_overrides, clear=False):
+            base_mod = importlib.import_module("frontend_server.settings.base")
+            return importlib.reload(base_mod)
+
+    def test_unset_defaults_to_30(self):
+        self.assertEqual(self._load_base({}).SIMULATOR_TARGET_FPS, 30)
+
+    def test_blank_defaults_to_30(self):
+        self.assertEqual(
+            self._load_base({"SIMULATOR_TARGET_FPS": ""}).SIMULATOR_TARGET_FPS, 30
+        )
+
+    def test_override_accepted_with_whitespace(self):
+        self.assertEqual(
+            self._load_base({"SIMULATOR_TARGET_FPS": " 60 "}).SIMULATOR_TARGET_FPS, 60
+        )
+
+    def test_malformed_rejected(self):
+        for value in ("abc", "30.5", "1e3", "+", " 12x"):
+            with self.subTest(value=value):
+                with self.assertRaises(ImproperlyConfigured):
+                    self._load_base({"SIMULATOR_TARGET_FPS": value})
+
+    def test_zero_rejected(self):
+        with self.assertRaises(ImproperlyConfigured):
+            self._load_base({"SIMULATOR_TARGET_FPS": "0"})
+
+    def test_negative_rejected(self):
+        with self.assertRaises(ImproperlyConfigured):
+            self._load_base({"SIMULATOR_TARGET_FPS": "-5"})
 
 
 class ProductionSettingsTests(TestCase):

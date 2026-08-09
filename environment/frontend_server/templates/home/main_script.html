@@ -7,6 +7,7 @@
 {{ persona_init_pos|json_script:"persona-init-pos" }}
 {{ mode|json_script:"simulator-mode" }}
 {{ initial_phase|json_script:"initial-phase" }}
+{{ simulator_target_fps|json_script:"simulator-target-fps" }}
 
 <script type="text/javascript">
 	function getCookie(name) {
@@ -65,6 +66,7 @@
 	}
 	const simulatorMode = getJsonScriptValue("simulator-mode", "");
 	const initialPhase = getJsonScriptValue("initial-phase", "");
+	const simulatorTargetFps = getJsonScriptValue("simulator-target-fps", 30);
 	let persona_names = {};
 	for (let i = 0, l = persona_init_pos.length; i < l; i++) {
 		let x = persona_init_pos[i];
@@ -80,6 +82,7 @@
 	  height: 800,
 	  parent: "game-container",
 	  pixelArt: true,
+	  fps: { target: simulatorTargetFps },
 	  physics: {
 	    default: "arcade",
 	    arcade: {

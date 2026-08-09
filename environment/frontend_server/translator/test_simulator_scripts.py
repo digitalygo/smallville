@@ -62,6 +62,19 @@ class SimulatorScriptTests(SimpleTestCase):
             source,
         )
 
+    def test_live_template_carries_simulator_target_fps_bridge(self):
+        template_source = (TEMPLATE_DIR / "home/main_script.html").read_text()
+        source = self.script_source("home/main_script.html")
+        self.assertIn(
+            '{{ simulator_target_fps|json_script:"simulator-target-fps" }}',
+            template_source,
+        )
+        self.assertIn(
+            'const simulatorTargetFps = getJsonScriptValue("simulator-target-fps", 30);',
+            source,
+        )
+        self.assertIn("fps: { target: simulatorTargetFps },", source)
+
     def test_live_handoff_waits_for_success_and_retries(self):
         source = self.script_source("home/main_script.html")
         post_source = source[
@@ -166,7 +179,7 @@ class SimulatorScriptTests(SimpleTestCase):
         self.assertIn("!isExecutableStep(postedStep)", source)
         self.assertIn("!isExecutableStep(pollStep)", source)
 
-    def run_home_script_in_node(self, step, mode, initial_phase, behavior):
+    def run_home_script_in_node(self, step, mode, initial_phase, behavior, fps_json=None):
         node = shutil.which("node")
         if node is None:
             self.skipTest("node is required to run simulator script behavior tests")
@@ -181,6 +194,7 @@ const elements = new Map([
   ["persona-init-pos", { textContent: "[]" }],
   ["simulator-mode", { textContent: MODE }],
   ["initial-phase", { textContent: INITIAL_PHASE }],
+FPS_ELEMENT
   ["game-time-content", { textContent: "" }],
   ["play_button", {}],
   ["pause_button", {}]
@@ -216,6 +230,13 @@ globalThis.Phaser = {
             .replace("MODE", json.dumps(json.dumps(mode)))
             .replace("INITIAL_PHASE", json.dumps(json.dumps(initial_phase)))
         )
+        if fps_json is None:
+            setup = setup.replace("FPS_ELEMENT\n", "")
+        else:
+            setup = setup.replace(
+                "FPS_ELEMENT",
+                f'  ["simulator-target-fps", {{ textContent: {json.dumps(fps_json)} }}],',
+            )
         hooks = """
 globalThis.simulatorHooks = {
   prepareLastExecutableMovement() {
@@ -307,6 +328,31 @@ if (invalidState.phase !== "complete") {
 }
 if (fetchCount !== 0) {
   throw new Error("unsafe initial step made a network request");
+}
+""",
+        )
+
+    def test_game_config_fps_target_uses_injected_setting(self):
+        self.run_home_script_in_node(
+            "0",
+            "simulate",
+            "update",
+            """
+if (!globalThis.gameConfig || !globalThis.gameConfig.fps || globalThis.gameConfig.fps.target !== 60) {
+  throw new Error("game config fps.target did not use the injected setting");
+}
+""",
+            fps_json="60",
+        )
+
+    def test_game_config_fps_target_defaults_to_30(self):
+        self.run_home_script_in_node(
+            "0",
+            "simulate",
+            "update",
+            """
+if (!globalThis.gameConfig || !globalThis.gameConfig.fps || globalThis.gameConfig.fps.target !== 30) {
+  throw new Error("game config fps.target did not fall back to 30");
 }
 """,
         )

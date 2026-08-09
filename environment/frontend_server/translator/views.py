@@ -17,6 +17,7 @@ import tempfile
 import uuid
 from contextlib import contextmanager
 
+from django.conf import settings
 from django.contrib.auth.decorators import login_required
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import render
@@ -951,8 +952,9 @@ def _validate_nodes_shape(nodes) -> None:
     (``event``, ``chat``, or ``thought``) plus the fields the
     persona_state template renders: ``node_count``, ``created``, and
     ``description`` for every node; ``subject``, ``predicate``, and
-    ``object`` for events; ``depth`` and a list ``filling`` for thoughts;
-    and a list ``filling`` for chats.
+    ``object`` for events; ``depth`` and a required ``filling`` that is
+    either JSON null or a list for thoughts (the backend persists plan
+    thoughts with null filling); and a list ``filling`` for chats.
     """
     if not isinstance(nodes, dict):
         raise ValueError("associative memory nodes must be a JSON object")
@@ -988,9 +990,15 @@ def _validate_nodes_shape(nodes) -> None:
                 raise ValueError(
                     f"associative memory node {node_id!r} missing 'depth'"
                 )
-            if not isinstance(node.get("filling"), list):
+            if "filling" not in node:
                 raise ValueError(
-                    f"associative memory node {node_id!r} 'filling' must be a list"
+                    f"associative memory node {node_id!r} missing 'filling'"
+                )
+            filling = node["filling"]
+            if filling is not None and not isinstance(filling, list):
+                raise ValueError(
+                    f"associative memory node {node_id!r} 'filling' must be "
+                    "JSON null or a list"
                 )
         elif node_type == "chat":
             if not isinstance(node.get("filling"), list):
@@ -1443,6 +1451,7 @@ def home(request):
         "persona_init_pos": persona_init_pos,
         "mode": "simulate",
         "initial_phase": initial_phase,
+        "simulator_target_fps": settings.SIMULATOR_TARGET_FPS,
     }
     template = "home/home.html"
     return render(request, template, context)
@@ -1514,6 +1523,7 @@ def replay(request, sim_code, step):
         "persona_init_pos": persona_init_pos,
         "mode": "replay",
         "initial_phase": initial_phase,
+        "simulator_target_fps": settings.SIMULATOR_TARGET_FPS,
     }
     template = "home/home.html"
     return render(request, template, context)

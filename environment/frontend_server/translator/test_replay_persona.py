@@ -15,7 +15,7 @@ import warnings
 from pathlib import Path
 from unittest.mock import patch
 
-from django.test import RequestFactory, TestCase
+from django.test import RequestFactory, TestCase, override_settings
 from django.contrib.auth.models import User
 
 from translator import views
@@ -138,6 +138,23 @@ class ReplayCheckpointAuthorityTests(TestCase):
         self.assertEqual(response.context["initial_phase"], "process")
         self.assertEqual(self._init_pos(response)["Isabella Rodriguez"], (1, 1))
         self.assertFalse((self.sim_dir / "reverie" / "meta.json").exists())
+
+    def test_replay_context_carries_simulator_target_fps(self):
+        _write_complete_checkpoint(self.sim_dir, "0000000001", self._three_personas())
+        self._write_env(0, self._positions())
+        response = self.client.get(f"/replay/{self.sim_code}/0/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["simulator_target_fps"], 30)
+        self.assertContains(
+            response, 'id="simulator-target-fps" type="application/json">30'
+        )
+        with override_settings(SIMULATOR_TARGET_FPS=60):
+            response = self.client.get(f"/replay/{self.sim_code}/0/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["simulator_target_fps"], 60)
+        self.assertContains(
+            response, 'id="simulator-target-fps" type="application/json">60'
+        )
 
     def test_valid_complete_checkpoint_passes(self):
         _write_complete_checkpoint(self.sim_dir, "0000000001", self._three_personas())
@@ -959,6 +976,24 @@ class ReplayPersonaStateTests(TestCase):
         response = self.client.get(self._url())
         self.assertEqual(response.status_code, 404)
 
+    def test_thought_missing_filling_fails_controlled(self):
+        self._write_legacy("legacy")
+        self._write_checkpoint("0000000001", "checkpoint")
+        self._corrupt_shape(
+            "associative_memory/nodes.json",
+            {
+                "node_1": {
+                    "type": "thought",
+                    "node_count": 1,
+                    "created": "2023-01-01 00:00:00",
+                    "description": "thought without filling",
+                    "depth": 1,
+                }
+            },
+        )
+        response = self.client.get(self._url())
+        self.assertEqual(response.status_code, 404)
+
     def test_chat_and_thought_nodes_render(self):
         self._write_legacy("legacy")
         self._write_checkpoint("0000000001", "checkpoint")
@@ -1008,6 +1043,54 @@ class ReplayPersonaStateTests(TestCase):
         self.assertEqual(
             response.context["a_mem_thought"][0]["filling"], ["evidence"]
         )
+
+    def test_thought_filling_null_renders(self):
+        self._write_legacy("legacy")
+        self._write_checkpoint("0000000001", "checkpoint")
+        self._corrupt_shape(
+            "associative_memory/nodes.json",
+            {
+                "node_1": {
+                    "type": "event",
+                    "node_count": 1,
+                    "created": "2023-01-01 00:00:00",
+                    "description": "event one",
+                    "subject": "s",
+                    "predicate": "p",
+                    "object": "o",
+                },
+                "node_2": {
+                    "type": "thought",
+                    "node_count": 2,
+                    "created": "2023-01-01 00:00:00",
+                    "description": "thought null filling",
+                    "depth": 2,
+                    "filling": None,
+                },
+            },
+        )
+        response = self.client.get(self._url())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["a_mem_thought"][0]["filling"], None)
+        self.assertIn("thought null filling", response.content.decode())
+
+    def test_chat_filling_null_fails_controlled(self):
+        self._write_legacy("legacy")
+        self._write_checkpoint("0000000001", "checkpoint")
+        self._corrupt_shape(
+            "associative_memory/nodes.json",
+            {
+                "node_1": {
+                    "type": "chat",
+                    "node_count": 1,
+                    "created": "2023-01-01 00:00:00",
+                    "description": "chat null filling",
+                    "filling": None,
+                }
+            },
+        )
+        response = self.client.get(self._url())
+        self.assertEqual(response.status_code, 404)
 
     def test_checkpoint_dir_without_pointer_keeps_legacy(self):
         self._write_legacy("legacy")
