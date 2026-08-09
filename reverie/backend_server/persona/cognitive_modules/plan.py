@@ -17,6 +17,77 @@ from persona.prompt_template.run_gpt_prompt import *
 from persona.cognitive_modules.retrieve import *
 from persona.cognitive_modules.converse import *
 
+
+_QUOTE_BRACKET_CHARS = set("'\"`{}[]()<>")
+_TRAILING_PUNCT_CHARS = set(".,;:!?")
+
+
+def _trim_candidate_label(text):
+  """
+  Strip wrapping whitespace, quotes, backticks, braces, brackets,
+  parentheses, and punctuation from a candidate string.
+  """
+  while text and (text[0].isspace() or text[0] in _QUOTE_BRACKET_CHARS
+                  or text[0] in _TRAILING_PUNCT_CHARS):
+    text = text[1:]
+  while text and (text[-1].isspace() or text[-1] in _QUOTE_BRACKET_CHARS
+                  or text[-1] in _TRAILING_PUNCT_CHARS):
+    text = text[:-1]
+  return text
+
+
+def _canonical_match_form(text):
+  """
+  Casefold a string and normalize every non-alphanumeric separator and run
+  of whitespace to a single space for matching.
+  """
+  return " ".join("".join(ch if ch.isalnum() else " " for ch in text.casefold()).split())
+
+
+def _contains_token_run(candidate_form, choice_form):
+  """
+  True when the choice's normalized token sequence appears contiguously
+  inside the candidate's normalized token sequence.
+  """
+  candidate_tokens = candidate_form.split()
+  choice_tokens = choice_form.split()
+  if len(choice_tokens) > len(candidate_tokens):
+    return False
+  for i in range(len(candidate_tokens) - len(choice_tokens) + 1):
+    if candidate_tokens[i:i + len(choice_tokens)] == choice_tokens:
+      return True
+  return False
+
+
+def canonical_choice(candidate, choices, fallback):
+  """
+  Resolve an untrusted model-generated string to one of the valid string
+  choices. Exact canonical matches win, then a unique contained valid
+  choice is accepted. Colon-delimited candidate components are considered
+  as labels without trusting extra path segments. Nothing is ever
+  invented: when no safe match exists, the caller-supplied fallback is
+  returned.
+  """
+  if not isinstance(candidate, str):
+    return fallback
+  if not choices or not all(isinstance(c, str) for c in choices):
+    return fallback
+  choice_forms = [_canonical_match_form(c) for c in choices]
+  candidate_texts = [candidate] + [part for part in candidate.split(":")]
+  for candidate_text in candidate_texts:
+    candidate_form = _canonical_match_form(_trim_candidate_label(candidate_text))
+    if not candidate_form:
+      continue
+    exact_matches = [c for c, cf in zip(choices, choice_forms) if cf == candidate_form]
+    if exact_matches:
+      return sorted(exact_matches)[0]
+    contained_matches = [c for c, cf in zip(choices, choice_forms)
+                         if _contains_token_run(candidate_form, cf)]
+    if len(contained_matches) == 1:
+      return contained_matches[0]
+  return fallback
+
+
 ##############################################################################
 # CHAPTER 2: Generate
 ##############################################################################
@@ -180,7 +251,14 @@ def generate_action_sector(act_desp, persona, maze):
     "bedroom 2"
   """
   if debug: print ("GNS FUNCTION: <generate_action_sector>")
-  return run_gpt_prompt_action_sector(act_desp, persona, maze)[0]
+  act_world = f"{maze.access_tile(persona.scratch.curr_tile)['world']}"
+  valid_sectors = persona.s_mem.get_accessible_sector_list(act_world)
+  if not valid_sectors:
+    return ""
+  model_sector = run_gpt_prompt_action_sector(act_desp, persona, maze)[0]
+  curr_sector = f"{maze.access_tile(persona.scratch.curr_tile)['sector']}"
+  fallback = curr_sector if curr_sector in valid_sectors else sorted(valid_sectors)[0]
+  return canonical_choice(model_sector, valid_sectors, fallback)
 
 
 def generate_action_arena(act_desp, persona, maze, act_world, act_sector): 
@@ -198,7 +276,23 @@ def generate_action_arena(act_desp, persona, maze, act_world, act_sector):
     "bedroom 2"
   """
   if debug: print ("GNS FUNCTION: <generate_action_arena>")
-  return run_gpt_prompt_action_arena(act_desp, persona, maze, act_world, act_sector)[0]
+  tile = maze.access_tile(persona.scratch.curr_tile)
+  valid_arenas = persona.s_mem.get_accessible_arena_list(act_world, act_sector)
+  if not valid_arenas:
+    curr_arenas = persona.s_mem.get_accessible_arena_list(tile["world"], tile["sector"])
+    if curr_arenas:
+      act_world, act_sector = tile["world"], tile["sector"]
+      valid_arenas = curr_arenas
+  if not valid_arenas:
+    return ""
+  model_arena = run_gpt_prompt_action_arena(act_desp, persona, maze, act_world, act_sector)[0]
+  curr_arena = f"{tile['arena']}"
+  if (f"{tile['world']}" == act_world and f"{tile['sector']}" == act_sector
+      and curr_arena in valid_arenas):
+    fallback = curr_arena
+  else:
+    fallback = sorted(valid_arenas)[0]
+  return canonical_choice(model_arena, valid_arenas, fallback)
 
 
 def generate_action_game_object(act_desp, act_address, persona, maze):
@@ -219,9 +313,11 @@ def generate_action_game_object(act_desp, act_address, persona, maze):
     "bed"
   """
   if debug: print ("GNS FUNCTION: <generate_action_game_object>")
-  if not persona.s_mem.get_str_accessible_arena_game_objects(act_address): 
+  game_objects = persona.s_mem.get_accessible_game_object_list_from_address(act_address)
+  if not game_objects:
     return "<random>"
-  return run_gpt_prompt_action_game_object(act_desp, persona, maze, act_address)[0]
+  model_game_object = run_gpt_prompt_action_game_object(act_desp, persona, maze, act_address)[0]
+  return canonical_choice(model_game_object, game_objects, "<random>")
 
 
 def generate_action_pronunciatio(act_desp, persona): 
@@ -521,6 +617,31 @@ def _long_term_planning(persona, new_day):
 
 
 
+def _ground_action_address(act_world, act_sector, act_arena, act_game_object,
+                           persona, maze):
+  """
+  Ensure the generated action address points at a real location in the
+  persona's spatial tree. The full address is either a real object
+  address or a real arena followed by "<random>". Never routes to an
+  unrelated hardcoded map location.
+  """
+  if persona.s_mem.is_valid_arena(act_world, act_sector, act_arena):
+    game_objects = persona.s_mem.get_accessible_game_object_list(act_world,
+                                                                 act_sector,
+                                                                 act_arena)
+    if act_game_object == "<random>" or act_game_object in game_objects:
+      return f"{act_world}:{act_sector}:{act_arena}:{act_game_object}"
+    return f"{act_world}:{act_sector}:{act_arena}:<random>"
+  tile = maze.access_tile(persona.scratch.curr_tile)
+  if persona.s_mem.is_valid_arena(tile["world"], tile["sector"], tile["arena"]):
+    game_objects = persona.s_mem.get_accessible_game_object_list(tile["world"],
+                                                                 tile["sector"],
+                                                                 tile["arena"])
+    game_object = act_game_object if act_game_object in game_objects else "<random>"
+    return f"{tile['world']}:{tile['sector']}:{tile['arena']}:{game_object}"
+  return ""
+
+
 def _determine_action(persona, maze): 
   """
   Creates the next action sequence for the persona. 
@@ -632,7 +753,8 @@ def _determine_action(persona, maze):
   act_address = f"{act_world}:{act_sector}:{act_arena}"
   act_game_object = generate_action_game_object(act_desp, act_address,
                                                 persona, maze)
-  new_address = f"{act_world}:{act_sector}:{act_arena}:{act_game_object}"
+  new_address = _ground_action_address(act_world, act_sector, act_arena,
+                                       act_game_object, persona, maze)
   act_pron = generate_action_pronunciatio(act_desp, persona)
   act_event = generate_action_event_triple(act_desp, persona)
   # Persona's actions also influence the object states. We set those up here. 

@@ -41,6 +41,7 @@ import re
 import shutil
 import stat
 import sys
+import threading
 import time
 import traceback
 import uuid
@@ -107,6 +108,10 @@ _STALE_MARKER_FILES = (
 _RUNTIME_LOCK_FILE = "runtime.lock"
 
 _LIVENESS_LOCK_FILE = "backend_alive.lock"
+
+_HEARTBEAT_MIN_INTERVAL = 0.01
+
+_PACE_WAIT_CHUNK_SECONDS = 60.0
 
 
 def _runtime_lock_path():
@@ -1002,6 +1007,31 @@ def _validate_staged_fork(staging):
         raise ValueError(str(exc)) from exc
 
 
+class HeartbeatPublicationError(RuntimeError):
+    """Raised when a heartbeat write fails; the message is always sanitized."""
+
+
+def _sanitize_heartbeat_error(exc):
+    """Return a sanitized heartbeat failure message without details."""
+    return f"Heartbeat publication failed ({exc.__class__.__name__})."
+
+
+def _wait_until_deadline(event, deadline):
+    """Wait until the monotonic ``deadline`` or until ``event`` is set.
+
+    The wait runs in finite bounded chunks of ``_PACE_WAIT_CHUNK_SECONDS``,
+    rechecking the monotonic clock and the shutdown flag after each chunk,
+    so an infinite deadline (the reciprocal of the parser-valid minimum
+    positive finite rate) never overflows the event wait and a shutdown
+    interrupts promptly.
+    """
+    while not event.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        event.wait(min(remaining, _PACE_WAIT_CHUNK_SECONDS))
+
+
 class ReverieServer:
     def __init__(
         self, fork_sim_code, sim_code, *, resume=False, publish_markers=False
@@ -1129,6 +1159,12 @@ class ReverieServer:
             )
 
         self.server_sleep = 0.1
+
+        self._state_lock = threading.Lock()
+        self._heartbeat_thread = None
+        self._heartbeat_stop = None
+        self._heartbeat_interval = None
+        self._heartbeat_failure = None
 
         if publish_markers:
             self.publish_runtime_markers()
@@ -1603,10 +1639,7 @@ class ReverieServer:
                     movements,
                 )
 
-                self.step += 1
-                self.curr_time += datetime.timedelta(
-                    seconds=self.sec_per_step
-                )
+                self._advance_step_time()
 
                 self._publish_curr_step()
                 _prune_uncommitted_artifacts(sim_folder, self.step)
@@ -1626,8 +1659,21 @@ class ReverieServer:
         Blocks until interrupted. SIGTERM (container shutdown) and Ctrl+C
         (SIGINT) both request a cooperative shutdown: the current step is
         finished, then a final save runs before exit. A heartbeat file is
-        published atomically at startup and at a throttled interval while the
-        loop is responsive.
+        published atomically at startup and then by a dedicated background
+        thread at ``heartbeat_interval``, so freshness is preserved even
+        while a step blocks on the LLM. The background publisher is stopped
+        and joined on every exit path.
+
+        Valid environment steps are rate-limited: the next valid step starts
+        no sooner than ``1 / max_steps_per_second`` wall-clock seconds after
+        the previous successful step completed, so slow LLM work naturally
+        lowers the throughput.
+        Missing or invalid environment input keeps the
+        short idle polling and never consumes a rate window. The pacing wait
+        runs through ``shutdown_event`` so a signal interrupts it and the
+        normal final-save exit still runs. The wait is split into finite
+        bounded chunks so a rate whose reciprocal overflows (the parser-valid
+        minimum subnormal) never passes infinity to the event wait.
         """
         sim_folder = f"{fs_storage}/{self.sim_code}"
         game_obj_cleanup = dict()
@@ -1642,16 +1688,17 @@ class ReverieServer:
         shutdown_event = new_shutdown_event()
         install_shutdown_handlers(shutdown_event)
 
-        self._publish_heartbeat()
-        last_heartbeat = time.monotonic()
+        self._ensure_state_lock()
+        self._publish_heartbeat_safe()
+        self._start_heartbeat_publisher(heartbeat_interval)
         warned_env_files = set()
+
+        min_step_interval = 1.0 / max_steps_per_second
+        last_step_completed_at = None
 
         try:
             while not shutdown_event.is_set():
-                now = time.monotonic()
-                if now - last_heartbeat >= heartbeat_interval:
-                    self._publish_heartbeat()
-                    last_heartbeat = now
+                self._raise_heartbeat_failure_if_any()
 
                 if self.step >= _MAX_STEP:
                     time.sleep(self.server_sleep)
@@ -1671,6 +1718,14 @@ class ReverieServer:
                                 f"corrected input."
                             )
                         time.sleep(self.server_sleep)
+                        continue
+
+                    if last_step_completed_at is not None:
+                        _wait_until_deadline(
+                            shutdown_event,
+                            last_step_completed_at + min_step_interval,
+                        )
+                    if shutdown_event.is_set():
                         continue
 
                     for key, val in game_obj_cleanup.items():
@@ -1750,10 +1805,7 @@ class ReverieServer:
                         movements,
                     )
 
-                    self.step += 1
-                    self.curr_time += datetime.timedelta(
-                        seconds=self.sec_per_step
-                    )
+                    self._advance_step_time()
                     step_count += 1
                     steps_since_save += 1
 
@@ -1768,32 +1820,42 @@ class ReverieServer:
                             f"({step_count} steps processed)"
                         )
 
+                    last_step_completed_at = time.monotonic()
+
                 time.sleep(self.server_sleep)
 
         except KeyboardInterrupt:
             print(f"\n[reverie] Received interrupt. Saving and exiting...")
             self.save()
+            self._raise_heartbeat_failure_if_any()
             print(f"[reverie] Saved at step {self.step}. Goodbye.")
         else:
-            self._publish_heartbeat()
+            self._publish_heartbeat_safe()
             self.save()
+            self._raise_heartbeat_failure_if_any()
             print(
                 f"[reverie] Shutdown requested. "
                 f"Saved at step {self.step}. Goodbye."
             )
+        finally:
+            self._stop_heartbeat_publisher()
 
     def _publish_heartbeat(self):
         """Publish the backend heartbeat atomically for a freshness check.
 
-        The heartbeat shares the runtime authority lock so a concurrent
-        clear cannot leave a stale heartbeat behind after a restart.
+        The step and curr_time pair is snapshotted under the per-server
+        state lock so a publication never observes a mismatched pair while
+        the main thread advances both. The heartbeat write shares the
+        runtime authority lock so a concurrent clear cannot leave a stale
+        heartbeat behind after a restart.
         """
+        step, curr_time = self._snapshot_runtime_state()
         payload = {
             "sim_code": self.sim_code,
-            "step": self.step,
+            "step": step,
             "curr_time": (
-                self.curr_time.strftime("%B %d, %Y, %H:%M:%S")
-                if self.curr_time
+                curr_time.strftime("%B %d, %Y, %H:%M:%S")
+                if curr_time
                 else None
             ),
             "timestamp": time.time(),
@@ -1803,6 +1865,98 @@ class ReverieServer:
             atomic_write_json_beneath(
                 fs_temp_storage, (), "backend_heartbeat.json", payload
             )
+
+    def _publish_heartbeat_safe(self):
+        """Publish the heartbeat or raise a sanitized publication error."""
+        try:
+            self._publish_heartbeat()
+        except Exception as exc:
+            raise HeartbeatPublicationError(
+                _sanitize_heartbeat_error(exc)
+            ) from None
+
+    def _raise_heartbeat_failure_if_any(self):
+        """Raise a sanitized error when the background publisher failed."""
+        failure = getattr(self, "_heartbeat_failure", None)
+        if failure is not None:
+            raise HeartbeatPublicationError(failure)
+
+    def _ensure_state_lock(self):
+        """Create the per-server state lock for servers built without init."""
+        if getattr(self, "_state_lock", None) is None:
+            self._state_lock = threading.Lock()
+
+    def _snapshot_runtime_state(self):
+        """Return a coherent (step, curr_time) pair for publication.
+
+        The pair is read under the per-server state lock so a concurrent
+        heartbeat publication never observes a mismatched pair while the
+        main thread advances both fields together.
+        """
+        lock = getattr(self, "_state_lock", None)
+        if lock is None:
+            return self.step, self.curr_time
+        with lock:
+            return self.step, self.curr_time
+
+    def _advance_step_time(self):
+        """Advance step and curr_time atomically under the state lock.
+
+        The lock is held only for the two in-memory assignments; no I/O,
+        sleep, or external lock is ever acquired while it is held.
+        """
+        lock = getattr(self, "_state_lock", None)
+        if lock is None:
+            self.step += 1
+            self.curr_time += datetime.timedelta(seconds=self.sec_per_step)
+            return
+        with lock:
+            self.step += 1
+            self.curr_time += datetime.timedelta(seconds=self.sec_per_step)
+
+    def _start_heartbeat_publisher(self, interval):
+        """Start the dedicated background heartbeat publisher thread."""
+        self._heartbeat_interval = interval
+        self._heartbeat_failure = None
+        self._heartbeat_stop = new_shutdown_event()
+        self._heartbeat_thread = threading.Thread(
+            target=self._run_heartbeat_publisher,
+            args=(interval, self._heartbeat_stop),
+            name="reverie-heartbeat",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
+
+    def _run_heartbeat_publisher(self, interval, stop_event):
+        """Publish at ``interval`` until stopped; record failures sanitized.
+
+        A publication failure is recorded on the server and the loop stops
+        so the main loop can propagate it at its next safe boundary. No
+        exception ever escapes this thread, so no background traceback or
+        prompt can print.
+        """
+        wait_seconds = max(interval, _HEARTBEAT_MIN_INTERVAL)
+        while not stop_event.is_set():
+            if stop_event.wait(wait_seconds):
+                break
+            try:
+                self._publish_heartbeat()
+            except Exception as exc:
+                self._heartbeat_failure = _sanitize_heartbeat_error(exc)
+                break
+
+    def _stop_heartbeat_publisher(self):
+        """Stop the background publisher and bounded-join it."""
+        stop = getattr(self, "_heartbeat_stop", None)
+        if stop is not None:
+            stop.set()
+        thread = getattr(self, "_heartbeat_thread", None)
+        if thread is None:
+            return
+        interval = getattr(
+            self, "_heartbeat_interval", _HEARTBEAT_MIN_INTERVAL
+        )
+        thread.join(timeout=max(interval, _HEARTBEAT_MIN_INTERVAL) + 1.0)
 
     def open_server(self):
         """Open up an interactive terminal prompt for running the simulation."""
@@ -2286,6 +2440,8 @@ def _run_serve(args):
                 try:
                     rs.serve_forever(autosave_interval=args.autosave_interval)
                 except LLMProviderError as exc:
+                    _fail_serve(str(exc))
+                except HeartbeatPublicationError as exc:
                     _fail_serve(str(exc))
             finally:
                 _clear_stale_markers()

@@ -16,7 +16,19 @@ Covers:
   5. Retry configuration contract: defaults 3 / 1.0 / 60.0, integer >= 1,
      finite float >= 0, finite float > 0, and malformed values fail fast at
      import. Non-finite values (inf, -inf, nan) are rejected with a
-     sanitized error naming only the variable and its range.
+     sanitized error naming only the variable and its range. The service
+     max-step rate contract: default 0.4, finite float > 0, malformed, zero,
+     negative, and non-finite values fail fast at import without echoing the
+     raw input, and the value is exported through the ``utils`` wildcard
+     flow.
+  6. Reasoning effort configuration contract: blank or unset yields ``None``
+     so reasoning arguments are omitted, valid values normalize to
+     lowercase/trimmed, and unknown values fail fast at import with a
+     sanitized error naming the variable and the allowed values. The central
+     helper maps effort to provider-specific kwargs (OpenRouter nested
+     ``extra_body``, OpenAI top-level ``reasoning_effort``) and fails closed
+     on unknown providers. Malformed chat content still retries and
+     sanitizes when effort is configured.
 
 These tests never touch the network: the client factory and sleeps are
 mocked and every assertion runs against in-memory fakes.
@@ -58,6 +70,35 @@ class _FakeCompletion:
         self.choices = [_FakeChoice(content)]
 
 
+class _NoChoicesCompletion:
+    """Malformed response object without a ``choices`` attribute."""
+
+
+class _EmptyChoicesCompletion:
+    def __init__(self):
+        self.choices = []
+
+
+class _MissingMessageCompletion:
+    def __init__(self):
+        self.choices = [object()]
+
+
+class _NoneContentCompletion:
+    def __init__(self):
+        self.choices = [_FakeChoice(None)]
+
+
+class _NonStringContentCompletion:
+    def __init__(self):
+        self.choices = [_FakeChoice(12345)]
+
+
+class _WhitespaceContentCompletion:
+    def __init__(self):
+        self.choices = [_FakeChoice(" \n\t ")]
+
+
 class _FlakyChatCompletions:
     """Chat completions fake that fails ``failures`` times, then pops responses."""
 
@@ -73,6 +114,20 @@ class _FlakyChatCompletions:
             raise self.exc
         if self.responses is not None:
             return _FakeCompletion(self.responses.pop(0))
+        return _FakeCompletion("ok")
+
+
+class _MalformedChatCompletions:
+    """Chat completions fake that pops raw responses, then returns valid ones."""
+
+    def __init__(self, raw=None):
+        self.raw = list(raw) if raw else []
+        self.calls = 0
+
+    def create(self, **kwargs):
+        self.calls += 1
+        if self.raw:
+            return self.raw.pop(0)
         return _FakeCompletion("ok")
 
 
@@ -98,9 +153,11 @@ class _FlakyEmbeddings:
         self.failures = failures
         self.exc = exc if exc is not None else RuntimeError("network down")
         self.calls = 0
+        self.kwargs_list = []
 
-    def create(self, input, model):
+    def create(self, **kwargs):
         self.calls += 1
+        self.kwargs_list.append(kwargs)
         if self.calls <= self.failures:
             raise self.exc
         return _FakeEmbeddingResponse([0.1, 0.2, 0.3])
@@ -132,6 +189,7 @@ class _RetryHarness(unittest.TestCase):
             llm_provider="openai",
             llm_model=None,
             llm_persona_models={},
+            llm_reasoning_effort=None,
             llm_api_retries=2,
             llm_api_retry_base_seconds=1.0,
             llm_api_timeout_seconds=60.0,
@@ -157,9 +215,14 @@ class _RetryHarness(unittest.TestCase):
         self._client().chat.completions = flaky
         return flaky
 
-    def _set_embeddings(self, failures=0, exc=None):
+    def _set_malformed(self, raw=None):
+        flaky = _MalformedChatCompletions(raw)
+        self._client().chat.completions = flaky
+        return flaky
+
+    def _set_embeddings(self, failures=0, exc=None, provider="openai"):
         flaky = _FlakyEmbeddings(failures, exc)
-        self._client().embeddings = flaky
+        self._client(provider).embeddings = flaky
         return flaky
 
     def _sleep_delays(self):
@@ -195,6 +258,7 @@ class ChatRequestRetryTests(_RetryHarness):
             "max_tokens": 5,
             "temperature": 0,
             "top_p": 1,
+            "stop": ["\n"],
             "frequency_penalty": 0,
             "presence_penalty": 0,
         }
@@ -219,7 +283,11 @@ class ChatRequestRetryTests(_RetryHarness):
 
     def test_gpt_request_exhaustion_raises_sanitized_error(self):
         self._set_chat(failures=10)
-        gpt_param = {"engine": "text-davinci-003", "max_tokens": 5}
+        gpt_param = {
+            "engine": "text-davinci-003",
+            "max_tokens": 5,
+            "stop": ["\n"],
+        }
         with self.assertRaises(LLMProviderError) as ctx:
             gpt_structure.GPT_request("hello", gpt_param)
         self.assertEqual(ctx.exception.operation, "chat")
@@ -254,6 +322,112 @@ class ChatRequestRetryTests(_RetryHarness):
         gpt_structure.temp_sleep.assert_not_called()
 
 
+class MalformedResponseRetryTests(_RetryHarness):
+    """Malformed provider responses retry, then sanitize on exhaustion."""
+
+    def test_malformed_shapes_retry_then_sanitize(self):
+        raws = (
+            _NoChoicesCompletion(),
+            _EmptyChoicesCompletion(),
+            _MissingMessageCompletion(),
+            _NoneContentCompletion(),
+            _NonStringContentCompletion(),
+            _WhitespaceContentCompletion(),
+        )
+        for raw in raws:
+            with self.subTest(shape=type(raw).__name__):
+                flaky = self._set_malformed([raw, raw, raw])
+                with self.assertRaises(LLMProviderError) as ctx:
+                    gpt_structure.ChatGPT_request("hello")
+                exc = ctx.exception
+                self.assertEqual(exc.provider, "openai")
+                self.assertEqual(exc.operation, "chat")
+                self.assertEqual(exc.attempts, 3)
+                self.assertEqual(flaky.calls, 3)
+                self.assertEqual(
+                    str(exc),
+                    "LLM provider 'openai' failed for chat after 3 attempts.",
+                )
+
+    def test_all_chat_wrappers_sanitize_malformed_exhaustion(self):
+        gpt_param = {
+            "engine": "text-davinci-003",
+            "max_tokens": 5,
+            "temperature": 0,
+            "stop": ["\n"],
+        }
+        wrappers = (
+            ("ChatGPT_single_request", lambda: gpt_structure.ChatGPT_single_request("hello")),
+            ("GPT4_request", lambda: gpt_structure.GPT4_request("hello")),
+            ("ChatGPT_request", lambda: gpt_structure.ChatGPT_request("hello")),
+            ("GPT_request", lambda: gpt_structure.GPT_request("hello", gpt_param)),
+        )
+        for name, call in wrappers:
+            with self.subTest(wrapper=name):
+                flaky = self._set_malformed([_NoneContentCompletion()] * 3)
+                with self.assertRaises(LLMProviderError) as ctx:
+                    call()
+                exc = ctx.exception
+                self.assertEqual(exc.operation, "chat")
+                self.assertEqual(exc.attempts, 3)
+                self.assertEqual(flaky.calls, 3)
+                self.assertEqual(
+                    str(exc),
+                    "LLM provider 'openai' failed for chat after 3 attempts.",
+                )
+
+    def test_malformed_malformed_success_retries_and_returns(self):
+        flaky = self._set_malformed(
+            [_NoneContentCompletion(), _WhitespaceContentCompletion()]
+        )
+        out = gpt_structure.ChatGPT_request("hello")
+        self.assertEqual(out, "ok")
+        self.assertEqual(flaky.calls, 3)
+        self.assertEqual(self._sleep_delays(), [1.0, 2.0])
+
+    def test_malformed_content_behavior_unchanged_with_effort_configured(self):
+        flaky = self._set_malformed([_NoneContentCompletion()] * 3)
+        with mock.patch.object(gpt_structure, "llm_reasoning_effort", "low"):
+            with self.assertRaises(LLMProviderError) as ctx:
+                gpt_structure.ChatGPT_request("hello")
+        exc = ctx.exception
+        self.assertEqual(exc.provider, "openai")
+        self.assertEqual(exc.operation, "chat")
+        self.assertEqual(exc.attempts, 3)
+        self.assertEqual(flaky.calls, 3)
+        self.assertEqual(
+            str(exc),
+            "LLM provider 'openai' failed for chat after 3 attempts.",
+        )
+
+    def test_valid_content_returns_unchanged(self):
+        flaky = self._set_chat(responses=["  lead and trail  "])
+        out = gpt_structure.ChatGPT_request("hello")
+        self.assertEqual(out, "  lead and trail  ")
+        self.assertEqual(flaky.calls, 1)
+
+    def test_malformed_content_never_reaches_validators_or_cleanup(self):
+        flaky = self._set_malformed([_NoneContentCompletion()] * 3)
+        validated = []
+        cleaned = []
+
+        def validate(resp, prompt=""):
+            validated.append(resp)
+            return True
+
+        def cleanup(resp, prompt=""):
+            cleaned.append(resp)
+            return resp
+
+        with self.assertRaises(LLMProviderError):
+            gpt_structure.ChatGPT_safe_generate_response(
+                "p", "ex", "sp", 3, "error", validate, cleanup
+            )
+        self.assertEqual(validated, [])
+        self.assertEqual(cleaned, [])
+        self.assertEqual(flaky.calls, 3)
+
+
 class EmbeddingRetryTests(_RetryHarness):
     """``get_embedding`` shares the same bounded retry policy."""
 
@@ -274,6 +448,22 @@ class EmbeddingRetryTests(_RetryHarness):
         self.assertEqual(exc.attempts, 3)
         self.assertEqual(flaky.calls, 3)
         self.assertNotIn("network down", str(exc))
+
+    def test_openrouter_embedding_retries_with_encoding_format(self):
+        flaky = self._set_embeddings(failures=2, provider="openrouter")
+        with mock.patch.multiple(
+            gpt_structure,
+            llm_provider="openrouter",
+            llm_embedding_models={"openrouter": "google/gemini-embedding-2"},
+        ):
+            vec = gpt_structure.get_embedding("Gemini retry text")
+        self.assertEqual(vec, [0.1, 0.2, 0.3])
+        self.assertEqual(flaky.calls, 3)
+        self.assertEqual(self._sleep_delays(), [1.0, 2.0])
+        for kwargs in flaky.kwargs_list:
+            self.assertEqual(kwargs["model"], "google/gemini-embedding-2")
+            self.assertEqual(kwargs["input"], ["Gemini retry text"])
+            self.assertEqual(kwargs["encoding_format"], "float")
 
 
 class SafeWrapperProviderFailureTests(_RetryHarness):
@@ -537,11 +727,69 @@ class RetryConfigParsingTests(unittest.TestCase):
         self.assertNotIn(raw, message)
         self.assertNotIn(f"{raw!r}", message)
 
+    def test_max_steps_per_second_default_when_unset(self):
+        self.assertEqual(utils._parse_max_steps_per_second(""), 0.4)
+        self.assertEqual(utils._parse_max_steps_per_second("   "), 0.4)
+        self.assertEqual(utils._parse_max_steps_per_second("\t\n"), 0.4)
+
+    def test_max_steps_per_second_valid_values_parse(self):
+        for raw, expected in (
+            ("0.5", 0.5),
+            ("2.5", 2.5),
+            (" 1e1 ", 10.0),
+            ("0.25", 0.25),
+        ):
+            self.assertEqual(utils._parse_max_steps_per_second(raw), expected)
+
+    def test_max_steps_per_second_invalid_fail_fast(self):
+        for raw in ("abc", "0", "-1", "-0.5"):
+            with self.assertRaises(ValueError) as ctx:
+                utils._parse_max_steps_per_second(raw)
+            self.assertIn("REVERIE_MAX_STEPS_PER_SECOND", str(ctx.exception))
+
+    def test_max_steps_per_second_non_finite_fail_fast(self):
+        for raw in ("inf", "-inf", "nan"):
+            with self.assertRaises(ValueError) as ctx:
+                utils._parse_max_steps_per_second(raw)
+            message = str(ctx.exception)
+            self.assertIn("REVERIE_MAX_STEPS_PER_SECOND", message)
+            self.assertIn("finite", message)
+            self.assertIn("> 0", message)
+            self.assertNotIn(f"{raw!r}", message)
+
+    def test_malformed_max_steps_per_second_never_echo_raw_value(self):
+        raw = "sk-invalid-rate-2c81"
+        with self.assertRaises(ValueError) as ctx:
+            utils._parse_max_steps_per_second(raw)
+        message = str(ctx.exception)
+        self.assertIn("REVERIE_MAX_STEPS_PER_SECOND", message)
+        self.assertIn("> 0", message)
+        self.assertNotIn(raw, message)
+        self.assertNotIn(f"{raw!r}", message)
+
+    def test_below_range_max_steps_per_second_never_echo_raw_value(self):
+        raw = "-91337"
+        with self.assertRaises(ValueError) as ctx:
+            utils._parse_max_steps_per_second(raw)
+        message = str(ctx.exception)
+        self.assertIn("REVERIE_MAX_STEPS_PER_SECOND", message)
+        self.assertIn("> 0", message)
+        self.assertNotIn(raw, message)
+        self.assertNotIn(f"{raw!r}", message)
+
 
 class RetryConfigImportTests(unittest.TestCase):
     """Malformed retry config aborts the import with a clear message."""
 
     def _import_utils(self, env):
+        env = dict(env)
+        for name in (
+            "LLM_API_RETRIES",
+            "LLM_API_RETRY_BASE_SECONDS",
+            "LLM_API_TIMEOUT_SECONDS",
+        ):
+            if name not in env:
+                env[name] = ""
         script = (
             "import sys; sys.path.insert(0, %r); import utils; "
             "print(utils.llm_api_retries, utils.llm_api_retry_base_seconds, "
@@ -673,6 +921,222 @@ class RetryConfigImportTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("LLM_API_TIMEOUT_SECONDS", result.stderr)
         self.assertNotIn(raw, result.stderr)
+
+
+class MaxStepsPerSecondImportTests(unittest.TestCase):
+    """Malformed max-step rate config aborts import with a clear message."""
+
+    def _import_utils(self, env):
+        env = dict(env)
+        for name in (
+            "LLM_API_RETRIES",
+            "LLM_API_RETRY_BASE_SECONDS",
+            "LLM_API_TIMEOUT_SECONDS",
+        ):
+            if name not in env:
+                env[name] = ""
+        if "REVERIE_MAX_STEPS_PER_SECOND" not in env:
+            env["REVERIE_MAX_STEPS_PER_SECOND"] = ""
+        script = (
+            "import sys; sys.path.insert(0, %r); import utils; "
+            "print(utils.max_steps_per_second)"
+        ) % _BACKEND_DIR
+        return subprocess.run(
+            [sys.executable, "-c", script],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+    def test_defaults_when_env_unset(self):
+        env = dict(os.environ)
+        env.pop("REVERIE_MAX_STEPS_PER_SECOND", None)
+        result = self._import_utils(env)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "0.4")
+
+    def test_valid_override_applies(self):
+        env = dict(os.environ)
+        env["REVERIE_MAX_STEPS_PER_SECOND"] = "2.5"
+        result = self._import_utils(env)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "2.5")
+
+    def test_malformed_fails_fast_import(self):
+        env = dict(os.environ)
+        env["REVERIE_MAX_STEPS_PER_SECOND"] = "abc"
+        result = self._import_utils(env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("REVERIE_MAX_STEPS_PER_SECOND", result.stderr)
+
+    def test_zero_and_negative_fail_fast_import(self):
+        for raw in ("0", "-1"):
+            env = dict(os.environ)
+            env["REVERIE_MAX_STEPS_PER_SECOND"] = raw
+            result = self._import_utils(env)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("REVERIE_MAX_STEPS_PER_SECOND", result.stderr)
+
+    def test_non_finite_fails_fast_import(self):
+        for raw in ("inf", "-inf", "nan"):
+            env = dict(os.environ)
+            env["REVERIE_MAX_STEPS_PER_SECOND"] = raw
+            result = self._import_utils(env)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("REVERIE_MAX_STEPS_PER_SECOND", result.stderr)
+            self.assertIn("finite", result.stderr)
+            self.assertNotIn(f"{raw!r}", result.stderr)
+
+    def test_malformed_never_echo_raw_value_on_import(self):
+        raw = "sk-invalid-rate-2c81"
+        env = dict(os.environ)
+        env["REVERIE_MAX_STEPS_PER_SECOND"] = raw
+        result = self._import_utils(env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("REVERIE_MAX_STEPS_PER_SECOND", result.stderr)
+        self.assertNotIn(raw, result.stderr)
+        self.assertNotIn(f"{raw!r}", result.stderr)
+
+    def test_below_range_never_echo_raw_value_on_import(self):
+        raw = "-91337"
+        env = dict(os.environ)
+        env["REVERIE_MAX_STEPS_PER_SECOND"] = raw
+        result = self._import_utils(env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("REVERIE_MAX_STEPS_PER_SECOND", result.stderr)
+        self.assertNotIn(raw, result.stderr)
+
+    def test_max_steps_per_second_exported_through_utils_wildcard(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "reverie_backend_config_export",
+            os.path.join(_BACKEND_DIR, "reverie.py"),
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertEqual(
+            module.max_steps_per_second, utils.max_steps_per_second
+        )
+        self.assertGreater(module.max_steps_per_second, 0)
+        self.assertIsInstance(module.max_steps_per_second, float)
+
+
+class ReasoningEffortParsingTests(unittest.TestCase):
+    """Reasoning effort parser enforces the contract and fails fast."""
+
+    def test_blank_and_default_yield_none(self):
+        self.assertIsNone(utils._parse_llm_reasoning_effort(""))
+        self.assertIsNone(utils._parse_llm_reasoning_effort("   "))
+        self.assertIsNone(utils._parse_llm_reasoning_effort("\t\n"))
+
+    def test_valid_values_normalize_lowercase_and_trim(self):
+        for raw, expected in (
+            ("low", "low"),
+            (" LOW ", "low"),
+            ("MEDIUM", "medium"),
+            ("none", "none"),
+            ("minimal", "minimal"),
+            ("high", "high"),
+            ("xhigh", "xhigh"),
+            ("max", "max"),
+        ):
+            self.assertEqual(utils._parse_llm_reasoning_effort(raw), expected)
+
+    def test_unknown_value_fails_with_sanitized_error(self):
+        raw = "turbo"
+        with self.assertRaises(ValueError) as ctx:
+            utils._parse_llm_reasoning_effort(raw)
+        message = str(ctx.exception)
+        self.assertIn("LLM_REASONING_EFFORT", message)
+        self.assertIn("Allowed values", message)
+        self.assertIn("none", message)
+        self.assertIn("max", message)
+        self.assertNotIn(raw, message)
+        self.assertNotIn(f"{raw!r}", message)
+
+    def test_malformed_value_never_echoes_raw(self):
+        raw = "sk-invalid-effort-4a2b"
+        with self.assertRaises(ValueError) as ctx:
+            utils._parse_llm_reasoning_effort(raw)
+        message = str(ctx.exception)
+        self.assertIn("LLM_REASONING_EFFORT", message)
+        self.assertIn("Allowed values", message)
+        self.assertNotIn(raw, message)
+        self.assertNotIn(f"{raw!r}", message)
+
+
+class ReasoningEffortKwargsTests(unittest.TestCase):
+    """Central reasoning-effort kwargs helper maps per provider, fails closed."""
+
+    def test_unset_effort_omits_all_reasoning_fields(self):
+        self.assertEqual(utils.reasoning_effort_kwargs("openrouter", None), {})
+        self.assertEqual(utils.reasoning_effort_kwargs("openai", None), {})
+        self.assertEqual(utils.reasoning_effort_kwargs("openrouter", ""), {})
+
+    def test_openrouter_uses_nested_extra_body(self):
+        self.assertEqual(
+            utils.reasoning_effort_kwargs("openrouter", "low"),
+            {"extra_body": {"reasoning": {"effort": "low"}}},
+        )
+
+    def test_openai_uses_top_level_reasoning_effort(self):
+        self.assertEqual(
+            utils.reasoning_effort_kwargs("openai", "low"),
+            {"reasoning_effort": "low"},
+        )
+
+    def test_unknown_provider_fails_closed(self):
+        with self.assertRaises(ValueError) as ctx:
+            utils.reasoning_effort_kwargs("anthropic", "low")
+        self.assertIn("anthropic", str(ctx.exception))
+        self.assertIn("Allowed values", str(ctx.exception))
+
+
+class ReasoningEffortImportTests(unittest.TestCase):
+    """Malformed reasoning effort config aborts the import with a clear message."""
+
+    def _import_utils(self, env):
+        env = dict(env)
+        if "LLM_REASONING_EFFORT" not in env:
+            env["LLM_REASONING_EFFORT"] = ""
+        script = (
+            "import sys; sys.path.insert(0, %r); import utils; "
+            "print(repr(utils.llm_reasoning_effort))"
+        ) % _BACKEND_DIR
+        return subprocess.run(
+            [sys.executable, "-c", script],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+    def test_default_when_env_unset(self):
+        env = dict(os.environ)
+        env.pop("LLM_REASONING_EFFORT", None)
+        result = self._import_utils(env)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "None")
+
+    def test_valid_override_normalizes_on_import(self):
+        env = dict(os.environ)
+        env["LLM_REASONING_EFFORT"] = " LOW "
+        result = self._import_utils(env)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "'low'")
+
+    def test_malformed_value_fails_fast_and_never_echoes_raw(self):
+        raw = "sk-invalid-effort-4a2b"
+        env = dict(os.environ)
+        env["LLM_REASONING_EFFORT"] = raw
+        result = self._import_utils(env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("LLM_REASONING_EFFORT", result.stderr)
+        self.assertIn("Allowed values", result.stderr)
+        self.assertNotIn(raw, result.stderr)
+        self.assertNotIn(f"{raw!r}", result.stderr)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,11 @@ Covers:
   3. OpenRouter attribution headers are attached to the OpenRouter client.
   4. Per-persona chat model/provider selection precedence.
   5. Provider fail-closed behavior: unknown providers raise before any API call.
+  6. Reasoning effort reaches every chat wrapper provider-specifically:
+     OpenRouter receives the nested ``extra_body`` reasoning block and
+     OpenAI receives the top-level ``reasoning_effort`` parameter, only when
+     configured. Blank effort omits all reasoning fields, output caps and
+     stop sequences stay absent, and the configured model stays exact.
 
 These tests never touch the network: the OpenAI client factory is mocked
 and every assertion runs against in-memory fakes.
@@ -94,8 +99,8 @@ class _FakeEmbeddings:
     def __init__(self):
         self.calls = []
 
-    def create(self, input, model):
-        self.calls.append({"input": input, "model": model})
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
         return _FakeEmbeddingResponse([0.1, 0.2, 0.3])
 
 
@@ -191,6 +196,7 @@ class EmbeddingModelConfigTests(unittest.TestCase):
             llm_provider="openai",
             llm_model=None,
             llm_persona_models={},
+            llm_reasoning_effort=None,
             llm_embedding_model=None,
             llm_embedding_models={},
         )
@@ -255,6 +261,76 @@ class EmbeddingModelConfigTests(unittest.TestCase):
         provider, model, _ = self._last_embedding_call()
         self.assertEqual(provider, "openrouter")
         self.assertEqual(model, "openai/text-embedding-ada-002")
+
+
+class EmbeddingRequestContractTests(unittest.TestCase):
+    """Embedding request bodies match the per-provider API contract."""
+
+    def setUp(self):
+        self._clients = {}
+        self._providers_requested = []
+
+        def fake_get_client(provider):
+            self._providers_requested.append(provider)
+            if provider not in self._clients:
+                self._clients[provider] = _FakeClient()
+            return self._clients[provider]
+
+        self._client_patcher = mock.patch.object(
+            gpt_structure, "_get_client", side_effect=fake_get_client
+        )
+        self._client_patcher.start()
+
+        self._env_patcher = mock.patch.multiple(
+            gpt_structure,
+            llm_provider="openai",
+            llm_model=None,
+            llm_persona_models={},
+            llm_reasoning_effort=None,
+            llm_embedding_model=None,
+            llm_embedding_models={},
+        )
+        self._env_patcher.start()
+
+    def tearDown(self):
+        self._env_patcher.stop()
+        self._client_patcher.stop()
+
+    def _last_embedding_call(self):
+        provider = self._providers_requested[-1]
+        return provider, self._clients[provider].embeddings.calls[-1]
+
+    def test_openrouter_gemini_embedding_request_contract(self):
+        gpt_structure.llm_provider = "openrouter"
+        gpt_structure.llm_embedding_models = {
+            "openrouter": "google/gemini-embedding-2"
+        }
+        gpt_structure.get_embedding("Complete Gemini text\nwith newline")
+
+        provider, call = self._last_embedding_call()
+        self.assertEqual(provider, "openrouter")
+        self.assertEqual(
+            call,
+            {
+                "model": "google/gemini-embedding-2",
+                "input": ["Complete Gemini text with newline"],
+                "encoding_format": "float",
+            },
+        )
+
+    def test_openai_embedding_request_has_no_openrouter_fields(self):
+        gpt_structure.get_embedding("OpenAI plain text")
+
+        provider, call = self._last_embedding_call()
+        self.assertEqual(provider, "openai")
+        self.assertNotIn("encoding_format", call)
+        self.assertEqual(
+            call,
+            {
+                "model": "text-embedding-ada-002",
+                "input": ["OpenAI plain text"],
+            },
+        )
 
 
 class OpenRouterAttributionTests(unittest.TestCase):
@@ -329,6 +405,7 @@ class ChatModelSelectionTests(unittest.TestCase):
             llm_provider="openai",
             llm_model=None,
             llm_persona_models={},
+            llm_reasoning_effort=None,
         )
         self._env_patcher.start()
 
@@ -395,6 +472,270 @@ class ChatModelSelectionTests(unittest.TestCase):
         self.assertEqual(call["model"], "anthropic/claude-3.5-sonnet")
 
 
+class ChatRequestKwargsTests(unittest.TestCase):
+    """Chat request bodies omit output caps and reasoning configuration."""
+
+    FORBIDDEN_KEYS = (
+        "stop",
+        "max_tokens",
+        "max_completion_tokens",
+        "reasoning",
+        "reasoning_effort",
+        "extra_body",
+    )
+
+    def setUp(self):
+        self._clients = {}
+        self._providers_requested = []
+
+        def fake_get_client(provider):
+            self._providers_requested.append(provider)
+            if provider not in self._clients:
+                self._clients[provider] = _FakeClient()
+            return self._clients[provider]
+
+        self._client_patcher = mock.patch.object(
+            gpt_structure, "_get_client", side_effect=fake_get_client
+        )
+        self._client_patcher.start()
+
+        self._env_patcher = mock.patch.multiple(
+            gpt_structure,
+            llm_provider="openai",
+            llm_model=None,
+            llm_persona_models={},
+            llm_reasoning_effort=None,
+        )
+        self._env_patcher.start()
+
+    def tearDown(self):
+        self._env_patcher.stop()
+        self._client_patcher.stop()
+
+    def _last_chat_call(self):
+        provider = self._providers_requested[-1]
+        return self._clients[provider].chat.completions.calls[-1]
+
+    def test_all_chat_wrappers_omit_stop_caps_and_reasoning_params(self):
+        gpt_param = {
+            "engine": "text-davinci-003",
+            "max_tokens": 999,
+            "temperature": 0.7,
+            "top_p": 0.5,
+            "stop": ["\n"],
+            "frequency_penalty": 0.2,
+            "presence_penalty": 0.3,
+        }
+        wrappers = (
+            (gpt_structure.ChatGPT_single_request, ("hello",)),
+            (gpt_structure.GPT4_request, ("hello",)),
+            (gpt_structure.ChatGPT_request, ("hello",)),
+            (gpt_structure.GPT_request, ("hello", dict(gpt_param))),
+        )
+        for wrapper, args in wrappers:
+            with self.subTest(wrapper=wrapper.__name__):
+                wrapper(*args)
+                call = self._last_chat_call()
+                for key in self.FORBIDDEN_KEYS:
+                    self.assertNotIn(key, call)
+
+    def test_simple_chat_wrappers_send_only_model_and_full_input(self):
+        wrappers = (
+            gpt_structure.ChatGPT_single_request,
+            gpt_structure.GPT4_request,
+            gpt_structure.ChatGPT_request,
+        )
+        for wrapper in wrappers:
+            with self.subTest(wrapper=wrapper.__name__):
+                wrapper("hello")
+                call = self._last_chat_call()
+                self.assertEqual(
+                    call,
+                    {
+                        "model": "gpt-4o",
+                        "messages": [{"role": "user", "content": "hello"}],
+                    },
+                )
+
+    def test_legacy_gpt_request_drops_max_tokens_and_stop_keeps_other_controls(self):
+        gpt_param = {
+            "engine": "text-davinci-003",
+            "max_tokens": 999,
+            "temperature": 0.7,
+            "top_p": 0.5,
+            "stop": ["\n"],
+            "frequency_penalty": 0.2,
+            "presence_penalty": 0.3,
+        }
+        gpt_structure.GPT_request("hello", gpt_param)
+        call = self._last_chat_call()
+        for key in self.FORBIDDEN_KEYS:
+            self.assertNotIn(key, call)
+        self.assertEqual(call["temperature"], 0.7)
+        self.assertEqual(call["top_p"], 0.5)
+        self.assertEqual(call["frequency_penalty"], 0.2)
+        self.assertEqual(call["presence_penalty"], 0.3)
+        self.assertEqual(
+            [m["role"] for m in call["messages"]], ["system", "user"]
+        )
+
+    def test_deepseek_0731_model_remains_request_model(self):
+        with mock.patch.multiple(
+            gpt_structure,
+            llm_provider="openrouter",
+            llm_model="deepseek/deepseek-v4-flash-0731",
+            llm_persona_models={},
+        ):
+            gpt_structure.ChatGPT_request("hello")
+        provider = self._providers_requested[-1]
+        call = self._clients[provider].chat.completions.calls[-1]
+        self.assertEqual(provider, "openrouter")
+        self.assertEqual(call["model"], "deepseek/deepseek-v4-flash-0731")
+        for key in self.FORBIDDEN_KEYS:
+            self.assertNotIn(key, call)
+
+
+class ReasoningEffortRequestTests(unittest.TestCase):
+    """Configured reasoning effort reaches chat wrappers provider-specifically."""
+
+    FORBIDDEN_KEYS = ("stop", "max_tokens", "max_completion_tokens")
+
+    def setUp(self):
+        self._clients = {}
+        self._providers_requested = []
+
+        def fake_get_client(provider):
+            self._providers_requested.append(provider)
+            if provider not in self._clients:
+                self._clients[provider] = _FakeClient()
+            return self._clients[provider]
+
+        self._client_patcher = mock.patch.object(
+            gpt_structure, "_get_client", side_effect=fake_get_client
+        )
+        self._client_patcher.start()
+
+        self._env_patcher = mock.patch.multiple(
+            gpt_structure,
+            llm_provider="openai",
+            llm_model=None,
+            llm_persona_models={},
+            llm_reasoning_effort=None,
+        )
+        self._env_patcher.start()
+
+    def tearDown(self):
+        self._env_patcher.stop()
+        self._client_patcher.stop()
+
+    def _last_chat_call(self):
+        provider = self._providers_requested[-1]
+        return self._clients[provider].chat.completions.calls[-1]
+
+    def _gpt_param(self):
+        return {
+            "engine": "text-davinci-003",
+            "max_tokens": 999,
+            "temperature": 0.7,
+            "top_p": 0.5,
+            "stop": ["\n"],
+            "frequency_penalty": 0.2,
+            "presence_penalty": 0.3,
+        }
+
+    def _wrappers(self):
+        gpt_param = self._gpt_param()
+        return (
+            (gpt_structure.ChatGPT_single_request, ("hello",)),
+            (gpt_structure.GPT4_request, ("hello",)),
+            (gpt_structure.ChatGPT_request, ("hello",)),
+            (gpt_structure.GPT_request, ("hello", dict(gpt_param))),
+        )
+
+    def test_openrouter_nested_low_on_all_four_wrappers(self):
+        for wrapper, args in self._wrappers():
+            with self.subTest(wrapper=wrapper.__name__):
+                with mock.patch.multiple(
+                    gpt_structure,
+                    llm_provider="openrouter",
+                    llm_model="deepseek/deepseek-v4-flash-0731",
+                    llm_reasoning_effort="low",
+                ):
+                    wrapper(*args)
+                call = self._last_chat_call()
+                self.assertEqual(
+                    call["extra_body"], {"reasoning": {"effort": "low"}}
+                )
+                self.assertNotIn("reasoning_effort", call)
+                self.assertNotIn("reasoning", call)
+                for key in self.FORBIDDEN_KEYS:
+                    self.assertNotIn(key, call)
+
+    def test_openai_top_level_low_on_all_four_wrappers(self):
+        for wrapper, args in self._wrappers():
+            with self.subTest(wrapper=wrapper.__name__):
+                with mock.patch.multiple(
+                    gpt_structure,
+                    llm_provider="openai",
+                    llm_model="gpt-4o",
+                    llm_reasoning_effort="low",
+                ):
+                    wrapper(*args)
+                call = self._last_chat_call()
+                self.assertEqual(call["reasoning_effort"], "low")
+                self.assertNotIn("extra_body", call)
+                self.assertNotIn("reasoning", call)
+                for key in self.FORBIDDEN_KEYS:
+                    self.assertNotIn(key, call)
+
+    def test_blank_effort_omits_all_reasoning_fields(self):
+        for wrapper, args in self._wrappers():
+            with self.subTest(wrapper=wrapper.__name__):
+                wrapper(*args)
+                call = self._last_chat_call()
+                for key in ("reasoning", "reasoning_effort", "extra_body"):
+                    self.assertNotIn(key, call)
+                for key in self.FORBIDDEN_KEYS:
+                    self.assertNotIn(key, call)
+
+    def test_no_cap_or_stop_added_with_effort_configured(self):
+        with mock.patch.multiple(
+            gpt_structure,
+            llm_provider="openrouter",
+            llm_model="deepseek/deepseek-v4-flash-0731",
+            llm_reasoning_effort="low",
+        ):
+            gpt_structure.GPT_request("hello", self._gpt_param())
+        call = self._last_chat_call()
+        self.assertEqual(call["extra_body"], {"reasoning": {"effort": "low"}})
+        self.assertEqual(call["temperature"], 0.7)
+        self.assertEqual(call["top_p"], 0.5)
+        self.assertEqual(call["frequency_penalty"], 0.2)
+        self.assertEqual(call["presence_penalty"], 0.3)
+        self.assertEqual(
+            [m["role"] for m in call["messages"]], ["system", "user"]
+        )
+        for key in self.FORBIDDEN_KEYS:
+            self.assertNotIn(key, call)
+
+    def test_deepseek_0731_model_exact_with_low_effort(self):
+        with mock.patch.multiple(
+            gpt_structure,
+            llm_provider="openrouter",
+            llm_model="deepseek/deepseek-v4-flash-0731",
+            llm_reasoning_effort="low",
+        ):
+            gpt_structure.ChatGPT_request("hello")
+        provider = self._providers_requested[-1]
+        call = self._clients[provider].chat.completions.calls[-1]
+        self.assertEqual(provider, "openrouter")
+        self.assertEqual(call["model"], "deepseek/deepseek-v4-flash-0731")
+        self.assertEqual(call["extra_body"], {"reasoning": {"effort": "low"}})
+        self.assertEqual(
+            call["messages"], [{"role": "user", "content": "hello"}]
+        )
+
+
 class ProviderFailClosedTests(unittest.TestCase):
     """Unknown providers must raise before any API call."""
 
@@ -418,6 +759,7 @@ class ProviderFailClosedTests(unittest.TestCase):
             llm_provider="openai",
             llm_model=None,
             llm_persona_models={},
+            llm_reasoning_effort=None,
         )
         self._env_patcher.start()
 

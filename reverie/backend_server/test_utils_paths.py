@@ -1,13 +1,21 @@
 """
 Isolated tests for production-path configuration in ``utils.py``.
 
-The configured project paths (``fs_storage``, ``fs_temp_storage``,
-``maze_assets_loc``, ``env_matrix``, ``env_visuals``) must be normalized
-absolute paths derived from the backend module location, not from the
-process working directory. A cwd-relative ``../../`` path is rejected by
-``read_json_checked`` (an unsafe ``..`` component), so the real bundled
-seed memory must load through the configured absolute ``fs_storage``
-without ``ValueError`` and without ``ResourceWarning``.
+The configured project paths must be normalized absolute paths derived
+from the backend module location, not from the process working directory.
+The checked-in paths (``fs_storage``, ``maze_assets_loc``, ``env_matrix``,
+``env_visuals``) must exist on a clean checkout. ``fs_temp_storage`` is an
+ignored generated runtime directory created by ``ReverieServer``
+initialization, so a clean checkout must not require it to already exist:
+the tests require its existing ``frontend_server`` parent and its expected
+normalized path/layout, and accept the directory itself as absent or
+present. No test creates ``temp_storage`` or any other persistent runtime
+directory.
+
+A cwd-relative ``../../`` path is rejected by ``read_json_checked`` (an
+unsafe ``..`` component), so the real bundled seed memory must load through
+the configured absolute ``fs_storage`` without ``ValueError`` and without
+``ResourceWarning``.
 
 These tests never touch the network. The cwd-independence and documented
 backend-working-dir checks run ``utils`` in subprocesses with different
@@ -43,6 +51,13 @@ from persona.memory_structures.spatial_memory import MemoryTree  # noqa: E402
 _CONFIGURED_PATHS = (
     "fs_storage",
     "fs_temp_storage",
+    "maze_assets_loc",
+    "env_matrix",
+    "env_visuals",
+)
+
+_CHECKED_IN_PATHS = (
+    "fs_storage",
     "maze_assets_loc",
     "env_matrix",
     "env_visuals",
@@ -125,14 +140,28 @@ def _load_without_resource_warning(factory, path):
 
 
 class ConfiguredPathTests(unittest.TestCase):
-    """The configured runtime paths are absolute, existing, and safe."""
+    """The configured runtime paths are absolute, normalized, and safe.
 
-    def test_configured_paths_are_absolute_and_existing(self):
-        for attr in _CONFIGURED_PATHS:
+    The checked-in paths (``fs_storage``, ``maze_assets_loc``, ``env_matrix``,
+    ``env_visuals``) must exist. ``fs_temp_storage`` is an ignored generated
+    runtime directory created by ``ReverieServer`` initialization: only its
+    existing ``frontend_server`` parent and normalized path are required, and
+    the directory itself may be absent or present.
+    """
+
+    def test_configured_paths_are_absolute_with_checked_in_present(self):
+        for attr in _CHECKED_IN_PATHS:
             with self.subTest(attr=attr):
                 path = getattr(utils, attr)
                 self.assertTrue(os.path.isabs(path), path)
                 self.assertTrue(os.path.exists(path), path)
+        with self.subTest(attr="fs_temp_storage"):
+            temp_path = utils.fs_temp_storage
+            self.assertTrue(os.path.isabs(temp_path), temp_path)
+            temp_parent = os.path.dirname(temp_path)
+            self.assertTrue(os.path.isdir(temp_parent), temp_parent)
+            if os.path.exists(temp_path):
+                self.assertTrue(os.path.isdir(temp_path), temp_path)
 
     def test_configured_paths_have_no_dotdot_component(self):
         for attr in _CONFIGURED_PATHS:
@@ -142,16 +171,27 @@ class ConfiguredPathTests(unittest.TestCase):
 
 
 class WorkingDirectoryIndependenceTests(unittest.TestCase):
-    """Importing ``utils`` yields the same paths from any working dir."""
+    """Importing ``utils`` yields the same paths from any working dir.
+
+    The checked-in storage and assets must exist from every cwd; the
+    generated ``temp_storage`` only requires its existing
+    ``frontend_server`` parent and may itself be absent or present.
+    """
 
     def test_same_paths_from_repo_root_and_backend_cwd(self):
         repo_root_paths = _imported_paths(os.path.dirname(_BACKEND_DIR))
         backend_cwd_paths = _imported_paths(_BACKEND_DIR)
         self.assertEqual(repo_root_paths, backend_cwd_paths)
-        for path in repo_root_paths:
+        storage_path, temp_path, assets_path = repo_root_paths
+        for path in (storage_path, temp_path, assets_path):
             self.assertTrue(os.path.isabs(path), path)
-            self.assertTrue(os.path.exists(path), path)
             self.assertNotIn("..", path.split(os.sep), path)
+        self.assertTrue(os.path.exists(storage_path), storage_path)
+        self.assertTrue(os.path.exists(assets_path), assets_path)
+        temp_parent = os.path.dirname(temp_path)
+        self.assertTrue(os.path.isdir(temp_parent), temp_parent)
+        if os.path.exists(temp_path):
+            self.assertTrue(os.path.isdir(temp_path), temp_path)
 
     def test_matches_documented_backend_cwd_relative_layout(self):
         backend_cwd_paths = _imported_paths(_BACKEND_DIR)
@@ -184,6 +224,7 @@ class WorkingDirectoryIndependenceTests(unittest.TestCase):
         self.assertEqual(
             backend_cwd_paths, (documented_storage, documented_temp, documented_assets)
         )
+        self.assertTrue(os.path.isdir(os.path.dirname(documented_temp)))
 
 
 class SeedMemoryLoadTests(unittest.TestCase):

@@ -63,8 +63,8 @@ class _FakeEmbeddings:
     def __init__(self):
         self.calls = []
 
-    def create(self, input, model):
-        self.calls.append({"input": input, "model": model})
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
         return _FakeEmbeddingResponse([0.1, 0.2, 0.3])
 
 
@@ -95,6 +95,8 @@ class EmbeddingRoutingTests(unittest.TestCase):
             llm_provider="openai",
             llm_model=None,
             llm_persona_models={},
+            llm_embedding_model=None,
+            llm_embedding_models={},
         )
         self._env_patcher.start()
 
@@ -186,6 +188,27 @@ class EmbeddingRoutingTests(unittest.TestCase):
         provider, model, _ = self._last_embedding_call()
         self.assertEqual(provider, "openai")
         self.assertEqual(model, "text-embedding-ada-002")
+
+    def test_openrouter_embedding_sends_encoding_format_float(self):
+        """OpenRouter embedding requests must request float vectors."""
+        persona = _FakePersona(name="Gina", provider="openrouter")
+        gpt_structure.get_embedding("Gina is sketching", persona=persona)
+
+        provider = self._providers_requested[-1]
+        call = self._clients[provider].embeddings.calls[-1]
+        self.assertEqual(provider, "openrouter")
+        self.assertEqual(call["model"], "openai/text-embedding-ada-002")
+        self.assertEqual(call["input"], ["Gina is sketching"])
+        self.assertEqual(call["encoding_format"], "float")
+
+    def test_openai_embedding_has_no_openrouter_only_fields(self):
+        """OpenAI embedding requests keep the plain text contract."""
+        gpt_structure.get_embedding("plain text")
+
+        provider = self._providers_requested[-1]
+        call = self._clients[provider].embeddings.calls[-1]
+        self.assertEqual(provider, "openai")
+        self.assertNotIn("encoding_format", call)
 
 
 _COGNITIVE_MODULES = [

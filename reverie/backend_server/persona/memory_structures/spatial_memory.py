@@ -40,6 +40,101 @@ class MemoryTree:
 
 
 
+  def get_world_list(self):
+    """
+    Returns the list of worlds present in the spatial tree in deterministic
+    insertion order. Malformed trees yield an empty list.
+    """
+    if not isinstance(self.tree, dict):
+      return []
+    return [w for w in self.tree.keys() if isinstance(w, str)]
+
+
+  def get_accessible_sector_list(self, curr_world):
+    """
+    Returns the list of sectors under the given world in deterministic
+    insertion order. Unknown or malformed worlds yield an empty list.
+    """
+    if not isinstance(curr_world, str) or not isinstance(self.tree, dict):
+      return []
+    world = self.tree.get(curr_world)
+    if not isinstance(world, dict):
+      return []
+    return [s for s in world.keys() if isinstance(s, str)]
+
+
+  def get_accessible_arena_list(self, world, sector):
+    """
+    Returns the list of arenas under the given world and sector in
+    deterministic insertion order. Unknown or malformed nodes yield an
+    empty list.
+    """
+    if not isinstance(world, str) or not isinstance(sector, str):
+      return []
+    if not isinstance(self.tree, dict):
+      return []
+    world_node = self.tree.get(world)
+    if not isinstance(world_node, dict):
+      return []
+    sector_node = world_node.get(sector)
+    if not isinstance(sector_node, dict):
+      return []
+    return [a for a in sector_node.keys() if isinstance(a, str)]
+
+
+  def get_accessible_game_object_list(self, world, sector, arena):
+    """
+    Returns the list of game objects under the given world, sector, and
+    arena in deterministic insertion order. Unknown or malformed nodes
+    yield an empty list.
+    """
+    if not isinstance(world, str) or not isinstance(sector, str) or not isinstance(arena, str):
+      return []
+    if not isinstance(self.tree, dict):
+      return []
+    world_node = self.tree.get(world)
+    if not isinstance(world_node, dict):
+      return []
+    sector_node = world_node.get(sector)
+    if not isinstance(sector_node, dict):
+      return []
+    arena_node = sector_node.get(arena)
+    if not isinstance(arena_node, list):
+      return []
+    return [o for o in arena_node if isinstance(o, str)]
+
+
+  def get_accessible_game_object_list_from_address(self, arena_address):
+    """
+    Returns the game object list for an arena given in "world:sector:arena"
+    address form. Malformed addresses yield an empty list.
+    """
+    if not isinstance(arena_address, str):
+      return []
+    parts = arena_address.split(":")
+    if len(parts) != 3:
+      return []
+    return self.get_accessible_game_object_list(parts[0], parts[1], parts[2])
+
+
+  def is_valid_arena(self, world, sector, arena):
+    """
+    Returns True when the given world, sector, and arena exist as real
+    nodes in the spatial tree.
+    """
+    if not isinstance(world, str) or not isinstance(sector, str) or not isinstance(arena, str):
+      return False
+    if not isinstance(self.tree, dict):
+      return False
+    world_node = self.tree.get(world)
+    if not isinstance(world_node, dict):
+      return False
+    sector_node = world_node.get(sector)
+    if not isinstance(sector_node, dict):
+      return False
+    return isinstance(sector_node.get(arena), list)
+
+
   def get_str_accessible_sectors(self, curr_world): 
     """
     Returns a summary string of all the arenas that the persona can access 
@@ -55,8 +150,7 @@ class MemoryTree:
     EXAMPLE STR OUTPUT
       "bedroom, kitchen, dining room, office, bathroom"
     """
-    x = ", ".join(list(self.tree[curr_world].keys()))
-    return x
+    return ", ".join(self.get_accessible_sector_list(curr_world))
 
 
   def get_str_accessible_sector_arenas(self, sector): 
@@ -74,11 +168,12 @@ class MemoryTree:
     EXAMPLE STR OUTPUT
       "bedroom, kitchen, dining room, office, bathroom"
     """
-    curr_world, curr_sector = sector.split(":")
-    if not curr_sector: 
+    if not isinstance(sector, str):
       return ""
-    x = ", ".join(list(self.tree[curr_world][curr_sector].keys()))
-    return x
+    parts = sector.split(":")
+    if len(parts) != 2:
+      return ""
+    return ", ".join(self.get_accessible_arena_list(parts[0], parts[1]))
 
 
   def get_str_accessible_arena_game_objects(self, arena):
@@ -95,16 +190,7 @@ class MemoryTree:
     EXAMPLE STR OUTPUT
       "phone, charger, bed, nightstand"
     """
-    curr_world, curr_sector, curr_arena = arena.split(":")
-
-    if not curr_arena: 
-      return ""
-
-    try: 
-      x = ", ".join(list(self.tree[curr_world][curr_sector][curr_arena]))
-    except: 
-      x = ", ".join(list(self.tree[curr_world][curr_sector][curr_arena.lower()]))
-    return x
+    return ", ".join(self.get_accessible_game_object_list_from_address(arena))
 
 
 if __name__ == '__main__':

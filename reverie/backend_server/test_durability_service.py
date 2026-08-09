@@ -1,5 +1,6 @@
 """
-Service loop startup, markers, heartbeat, terminal step safety, and SIGTERM.
+Service loop startup, markers, heartbeat, terminal step safety, step rate
+pacing, and SIGTERM.
 
 Run from the repo root:
 
@@ -9,14 +10,17 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import datetime
 import io
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import unittest
 from unittest import mock
@@ -27,6 +31,7 @@ if _BACKEND_DIR not in sys.path:
 
 import durability  # noqa: E402
 import reverie  # noqa: E402
+import utils  # noqa: E402
 from test_durability_shared import (_BACKEND_DIR, _FakePersona, _MARKER_NAMES, _META, _SEEDED_SCRATCH, _StepPersona, _write_seeded_persona, _write_sim, _write_stale_markers)  # noqa: E402
 from _service_loop_harness import _ServiceLoopHarness  # noqa: E402
 
@@ -115,36 +120,270 @@ class HeartbeatTests(_ServiceLoopHarness):
         self.assertIn("timestamp", payload)
         self.assertNotEqual(payload.get("stale"), True)
 
-    def test_heartbeat_throttled_not_every_iteration(self):
-        """The heartbeat updates at the interval, not on every loop pass."""
+    @contextlib.contextmanager
+    def _serve_forever_in_worker(self, rs, **kwargs):
+        """Run serve_forever in a worker thread with a controllable shutdown.
+
+        Yields ``(worker, shutdown, outcome)``. ``shutdown`` is the event
+        serve_forever waits on and ``outcome`` collects any exception that
+        escapes the worker. The context always requests shutdown and joins
+        the worker so no thread leaks even when an assertion fails.
+        """
+        shutdown = threading.Event()
+        stop = threading.Event()
+        outcome = []
+
+        def _run():
+            try:
+                with mock.patch.object(
+                    reverie, "install_shutdown_handlers"
+                ):
+                    rs.serve_forever(**kwargs)
+            except BaseException as exc:
+                outcome.append(exc)
+
+        with mock.patch.object(
+            reverie, "new_shutdown_event", side_effect=[shutdown, stop]
+        ):
+            worker = threading.Thread(target=_run, daemon=True)
+            worker.start()
+            try:
+                yield worker, shutdown, outcome
+            finally:
+                shutdown.set()
+                worker.join(10)
+                stop.set()
+
+    def test_heartbeat_updates_while_move_blocked(self):
+        """The background thread publishes while the main thread is in move."""
+        _write_sim(self.storage, "origin")
+        with mock.patch.object(reverie, "Persona", _StepPersona):
+            rs = reverie.ReverieServer("origin", "target")
+        rs.save = mock.Mock()
+        move_blocked = threading.Event()
+        release_move = threading.Event()
+
+        def _blocking_move(maze, personas, tile, curr_time):
+            move_blocked.set()
+            release_move.wait(30)
+            return (tile, "pronunciatio", "description")
+
+        rs.personas["Isabella Rodriguez"].move = _blocking_move
+
+        with mock.patch.object(
+            rs, "_publish_heartbeat", wraps=rs._publish_heartbeat
+        ) as pub:
+            with self._serve_forever_in_worker(
+                rs, autosave_interval=10, heartbeat_interval=0.05
+            ) as (worker, shutdown, outcome):
+                self.assertTrue(move_blocked.wait(10), "move never started")
+                deadline = time.monotonic() + 5
+                while pub.call_count < 3 and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertGreaterEqual(
+                    pub.call_count, 3, "no heartbeat while move blocked"
+                )
+                with open(self._heartbeat_path()) as f:
+                    payload = json.load(f)
+                self.assertEqual(payload["sim_code"], "target")
+                self.assertEqual(payload["step"], 0)
+                self.assertEqual(
+                    payload["curr_time"],
+                    "February 13, 2023, 00:00:00",
+                )
+                self.assertIsInstance(payload["timestamp"], (int, float))
+                self.assertEqual(payload["pid"], os.getpid())
+                release_move.set()
+        self.assertFalse(
+            rs._heartbeat_thread.is_alive(), "heartbeat thread leaked"
+        )
+        rs.save.assert_called_once()
+        self.assertEqual(outcome, [])
+
+    def test_heartbeat_payload_step_time_coherent_during_steps(self):
+        """Every published heartbeat keeps a coherent step and curr_time."""
+        _write_sim(self.storage, "origin")
+        with mock.patch.object(reverie, "Persona", _FeedingPersona):
+            rs = reverie.ReverieServer("origin", "target")
+        rs.save = mock.Mock()
+        rs.server_sleep = 0.01
+        rs.personas["Isabella Rodriguez"].env_dir = os.path.join(
+            self.storage, "target", "environment"
+        )
+        payloads = []
+        real_publish = rs._publish_heartbeat
+
+        def _capture_and_publish():
+            real_publish()
+            with open(self._heartbeat_path()) as f:
+                payloads.append(json.load(f))
+
+        with mock.patch.object(
+            rs, "_publish_heartbeat", side_effect=_capture_and_publish
+        ):
+            with mock.patch.object(
+                reverie, "max_steps_per_second", 1000.0
+            ):
+                with self._serve_forever_in_worker(
+                    rs, autosave_interval=100, heartbeat_interval=0.02
+                ) as (worker, shutdown, outcome):
+                    deadline = time.monotonic() + 15
+                    while rs.step < 15 and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    self.assertGreaterEqual(rs.step, 15, "steps never advanced")
+                    shutdown.set()
+
+        self.assertGreaterEqual(len(payloads), 5)
+        start = datetime.datetime.strptime(
+            _META["curr_time"], "%B %d, %Y, %H:%M:%S"
+        )
+        prev_step = -1
+        for payload in payloads:
+            step = payload["step"]
+            self.assertGreaterEqual(step, prev_step)
+            prev_step = step
+            expected = (
+                start
+                + datetime.timedelta(seconds=step * rs.sec_per_step)
+            ).strftime("%B %d, %Y, %H:%M:%S")
+            self.assertEqual(
+                payload["curr_time"],
+                expected,
+                msg=f"incoherent heartbeat at step {step}",
+            )
+        self.assertFalse(
+            rs._heartbeat_thread.is_alive(), "heartbeat thread leaked"
+        )
+        rs.save.assert_called_once()
+        self.assertEqual(outcome, [])
+
+    def test_no_duplicate_busy_loop_publication(self):
+        """Heartbeats follow the interval, never one per loop iteration."""
         _write_sim(self.storage, "origin")
         rs = reverie.ReverieServer("origin", "target")
         rs.save = mock.Mock()
-        counter = [0.0]
+        with mock.patch.object(
+            reverie, "_read_snapshot_json", return_value=None
+        ):
+            with mock.patch.object(rs, "_publish_heartbeat") as pub:
+                with self._serve_forever_in_worker(
+                    rs, autosave_interval=10, heartbeat_interval=0.1
+                ) as (worker, shutdown, outcome):
+                    time.sleep(0.55)
+                    shutdown.set()
+        self.assertGreaterEqual(pub.call_count, 2)
+        self.assertLessEqual(pub.call_count, 12)
+        self.assertFalse(
+            rs._heartbeat_thread.is_alive(), "heartbeat thread leaked"
+        )
+        rs.save.assert_called_once()
+        self.assertEqual(outcome, [])
 
-        def fake_monotonic():
-            counter[0] += 0.5
-            return counter[0]
-
+    def test_heartbeat_thread_stops_on_keyboard_interrupt(self):
+        """A KeyboardInterrupt stops and joins the background publisher."""
+        _write_sim(self.storage, "origin")
+        rs = reverie.ReverieServer("origin", "target")
+        rs.save = mock.Mock()
         with mock.patch.object(reverie, "install_shutdown_handlers"):
             with mock.patch.object(
-                reverie, "_read_snapshot_json", return_value=None
+                reverie, "_read_snapshot_json", side_effect=KeyboardInterrupt
             ):
-                with mock.patch.object(
-                    reverie.time, "monotonic", side_effect=fake_monotonic
-                ):
-                    with mock.patch.object(
-                        reverie.time,
-                        "sleep",
-                        side_effect=[None, None, None, KeyboardInterrupt],
+                rs.serve_forever(autosave_interval=10)
+        self.assertFalse(
+            rs._heartbeat_thread.is_alive(), "heartbeat thread leaked"
+        )
+        rs.save.assert_called_once()
+
+    def test_heartbeat_thread_stops_on_unexpected_exception(self):
+        """An unexpected main-loop exception stops the publisher too."""
+        _write_sim(self.storage, "origin")
+        rs = reverie.ReverieServer("origin", "target")
+        rs.save = mock.Mock()
+        with mock.patch.object(reverie, "install_shutdown_handlers"):
+            with mock.patch.object(
+                reverie, "_read_snapshot_json", side_effect=OSError("boom")
+            ):
+                with self.assertRaises(OSError):
+                    rs.serve_forever(autosave_interval=10)
+        self.assertFalse(
+            rs._heartbeat_thread.is_alive(), "heartbeat thread leaked"
+        )
+
+    def test_heartbeat_thread_stops_on_cooperative_shutdown(self):
+        """A cooperative shutdown stops and joins the background publisher."""
+        _write_sim(self.storage, "origin")
+        rs = reverie.ReverieServer("origin", "target")
+        rs.save = mock.Mock()
+        with mock.patch.object(
+            reverie, "_read_snapshot_json", return_value=None
+        ):
+            with self._serve_forever_in_worker(
+                rs, autosave_interval=10, heartbeat_interval=0.05
+            ) as (worker, shutdown, outcome):
+                time.sleep(0.2)
+                shutdown.set()
+        self.assertFalse(
+            rs._heartbeat_thread.is_alive(), "heartbeat thread leaked"
+        )
+        rs.save.assert_called_once()
+        self.assertEqual(outcome, [])
+
+    def test_heartbeat_failure_propagates_sanitized_at_safe_boundary(self):
+        """A background write failure surfaces sanitized at the next step."""
+        _write_sim(self.storage, "origin")
+        with mock.patch.object(reverie, "Persona", _StepPersona):
+            rs = reverie.ReverieServer("origin", "target")
+        rs.save = mock.Mock()
+        move_blocked = threading.Event()
+        release_move = threading.Event()
+
+        def _blocking_move(maze, personas, tile, curr_time):
+            move_blocked.set()
+            release_move.wait(30)
+            return (tile, "pronunciatio", "description")
+
+        rs.personas["Isabella Rodriguez"].move = _blocking_move
+        real_publish = rs._publish_heartbeat
+        calls = [0]
+
+        def _flaky_publish():
+            calls[0] += 1
+            if calls[0] > 1:
+                raise OSError("SECRET sk-or-v1-0123456789")
+            real_publish()
+
+        stderr = io.StringIO()
+        with mock.patch.object(
+            rs, "_publish_heartbeat", side_effect=_flaky_publish
+        ):
+            with contextlib.redirect_stderr(stderr):
+                with self._serve_forever_in_worker(
+                    rs, autosave_interval=10, heartbeat_interval=0.05
+                ) as (worker, shutdown, outcome):
+                    self.assertTrue(move_blocked.wait(10), "move never started")
+                    deadline = time.monotonic() + 10
+                    while (
+                        getattr(rs, "_heartbeat_failure", None) is None
+                        and time.monotonic() < deadline
                     ):
-                        with mock.patch.object(
-                            rs, "_publish_heartbeat"
-                        ) as pub:
-                            rs.serve_forever(
-                                autosave_interval=10, heartbeat_interval=1.0
-                            )
-        self.assertEqual(pub.call_count, 3)
+                        time.sleep(0.01)
+                    self.assertIsNotNone(
+                        rs._heartbeat_failure,
+                        "failure never recorded",
+                    )
+                    release_move.set()
+        self.assertEqual(len(outcome), 1)
+        exc = outcome[0]
+        self.assertIsInstance(exc, reverie.HeartbeatPublicationError)
+        self.assertIn("Heartbeat publication failed", str(exc))
+        self.assertNotIn("SECRET", str(exc))
+        self.assertNotIn("sk-or-v1", str(exc))
+        self.assertNotIn("Traceback", stderr.getvalue())
+        self.assertNotIn("SECRET", stderr.getvalue())
+        self.assertFalse(
+            rs._heartbeat_thread.is_alive(), "heartbeat thread leaked"
+        )
+        rs.save.assert_not_called()
 
     def test_heartbeat_is_valid_json(self):
         _write_sim(self.storage, "origin")
@@ -626,6 +865,11 @@ class MaxStepTerminalSafetyTests(_ServiceLoopHarness):
         self._write_terminal_sim(reverie._MAX_STEP)
         rs = reverie.ReverieServer("origin", "target")
         rs.save = mock.Mock()
+
+        def _wait_then_interrupt(_seconds):
+            threading.Event().wait(0.2)
+            raise KeyboardInterrupt
+
         with mock.patch.object(reverie, "install_shutdown_handlers"):
             with mock.patch.object(rs, "_publish_curr_step") as pub_step:
                 with mock.patch.object(
@@ -636,7 +880,7 @@ class MaxStepTerminalSafetyTests(_ServiceLoopHarness):
                     with mock.patch.object(
                         reverie.time,
                         "sleep",
-                        side_effect=[None, KeyboardInterrupt],
+                        side_effect=_wait_then_interrupt,
                     ):
                         rs.serve_forever(
                             autosave_interval=10, heartbeat_interval=0.0
@@ -706,6 +950,282 @@ class MaxStepTerminalSafetyTests(_ServiceLoopHarness):
 
 
 
+class _PacingClock:
+    """Fake monotonic clock advanced only by fake pacing waits."""
+
+    def __init__(self, start=0.0):
+        self.now = start
+
+    def monotonic(self):
+        return self.now
+
+
+class _PacingEvent:
+    """Fake shutdown event: wait() records and advances the fake clock.
+
+    An optional ``on_wait`` hook fires before the clock advances, so a test
+    can set the event (simulating SIGTERM) exactly when a pace wait begins.
+    An optional ``real_hold`` blocks real time briefly so background threads
+    (the heartbeat publisher) can be observed during the wait.
+    """
+
+    def __init__(self, clock, real_hold=0.0):
+        self.clock = clock
+        self.real_hold = real_hold
+        self.waits = []
+        self.on_wait = None
+        self._set = False
+
+    def wait(self, timeout):
+        self.waits.append(timeout)
+        if self.on_wait is not None:
+            self.on_wait(self)
+        if self.real_hold:
+            threading.Event().wait(self.real_hold)
+        self.clock.now += timeout
+        return self._set
+
+    def is_set(self):
+        return self._set
+
+    def set(self):
+        self._set = True
+
+
+class MaxStepRatePacingTests(_ServiceLoopHarness):
+    """Service-mode step rate limiting via REVERIE_MAX_STEPS_PER_SECOND.
+
+    Valid steps are spaced at least ``1 / rate`` wall-clock seconds after
+    the previous successful completion; the first valid step is immediate;
+    missing or invalid input keeps the 0.1 idle poll without consuming a
+    rate slot; the pace wait is interruptible, and the heartbeat continues
+    during it. The fake clock and event keep every wait deterministic and
+    free of real rate-window sleeps.
+    """
+
+    def _paced_server(self, rate):
+        _write_sim(self.storage, "origin")
+        with mock.patch.object(reverie, "Persona", _FeedingPersona):
+            rs = reverie.ReverieServer("origin", "target")
+        rs.save = mock.Mock()
+        rs.personas["Isabella Rodriguez"].env_dir = os.path.join(
+            self.storage, "target", "environment"
+        )
+        clock = _PacingClock()
+        pacing = _PacingEvent(clock)
+        stop = threading.Event()
+        return rs, clock, pacing, stop
+
+    def _serve_paced(self, rs, pacing, stop, rate, **kwargs):
+        """Run ``serve_forever`` with fake clock and pacing event patched."""
+        with mock.patch.object(reverie, "install_shutdown_handlers"):
+            with mock.patch.object(reverie, "max_steps_per_second", rate):
+                with mock.patch.object(
+                    reverie, "new_shutdown_event", side_effect=[pacing, stop]
+                ):
+                    with mock.patch.object(
+                        reverie.time, "monotonic", pacing.clock.monotonic
+                    ):
+                        rs.serve_forever(**kwargs)
+
+    def test_first_step_immediate_then_exact_rate_spacing(self):
+        """The first valid step runs instantly; later steps wait 1/rate."""
+        rs, clock, pacing, stop = self._paced_server(rate=0.4)
+        clock.now = 1000.0
+        waits = {"count": 0}
+
+        def _stop_on_third_wait(event):
+            waits["count"] += 1
+            if waits["count"] == 3:
+                event.set()
+
+        pacing.on_wait = _stop_on_third_wait
+        start = rs.curr_time
+        self._serve_paced(
+            rs, pacing, stop, rate=0.4, autosave_interval=100
+        )
+        self.assertEqual(pacing.waits, [2.5, 2.5, 2.5])
+        self.assertEqual(waits["count"], 3)
+        self.assertEqual(rs.step, 3)
+        self.assertEqual(
+            rs.curr_time - start,
+            datetime.timedelta(seconds=3 * rs.sec_per_step),
+        )
+        self.assertEqual(rs.sec_per_step, _META["sec_per_step"])
+        rs.save.assert_called_once()
+
+    def test_pacing_window_scales_with_configured_rate(self):
+        """A higher rate yields proportionally shorter pace waits."""
+        rs, clock, pacing, stop = self._paced_server(rate=2.0)
+        waits = {"count": 0}
+
+        def _stop_on_second_wait(event):
+            waits["count"] += 1
+            if waits["count"] == 2:
+                event.set()
+
+        pacing.on_wait = _stop_on_second_wait
+        self._serve_paced(
+            rs, pacing, stop, rate=2.0, autosave_interval=100
+        )
+        self.assertEqual(pacing.waits, [0.5, 0.5])
+        self.assertEqual(rs.step, 2)
+        rs.save.assert_called_once()
+
+    def test_shutdown_interrupts_rate_pacing_and_final_saves(self):
+        """A signal during the pace wait skips the pending step and saves."""
+        rs, clock, pacing, stop = self._paced_server(rate=0.4)
+        clock.now = 1000.0
+        pacing.on_wait = lambda event: event.set()
+        self._serve_paced(
+            rs, pacing, stop, rate=0.4, autosave_interval=100
+        )
+        self.assertEqual(pacing.waits, [2.5])
+        self.assertEqual(rs.step, 1)
+        self.assertTrue(
+            os.path.exists(
+                os.path.join(self.storage, "target", "movement", "0.json")
+            )
+        )
+        self.assertFalse(
+            os.path.exists(
+                os.path.join(self.storage, "target", "movement", "1.json")
+            )
+        )
+        rs.save.assert_called_once()
+        self.assertFalse(
+            rs._heartbeat_thread.is_alive(), "heartbeat thread leaked"
+        )
+
+    def test_minimum_subnormal_rate_chunks_infinite_wait_and_interrupts(self):
+        """Parser-valid min subnormal never overflows the pacing event wait.
+
+        ``1 / 5e-324`` is infinite, so the second-step pace wait must run in
+        finite bounded chunks and a shutdown during a chunk must interrupt
+        promptly instead of waiting forever or raising OverflowError.
+        """
+        rate = utils._parse_max_steps_per_second("5e-324")
+        self.assertEqual(rate, 5e-324)
+        self.assertEqual(1.0 / rate, float("inf"))
+        rs, clock, pacing, stop = self._paced_server(rate=rate)
+        clock.now = 1000.0
+        pacing.on_wait = lambda event: event.set()
+        self._serve_paced(
+            rs, pacing, stop, rate=rate, autosave_interval=100
+        )
+        self.assertEqual(
+            pacing.waits, [reverie._PACE_WAIT_CHUNK_SECONDS]
+        )
+        self.assertEqual(rs.step, 1)
+        rs.save.assert_called_once()
+        self.assertFalse(
+            rs._heartbeat_thread.is_alive(), "heartbeat thread leaked"
+        )
+
+    def test_missing_and_invalid_env_keep_idle_poll_without_pacing(self):
+        """Idle polling stays server_sleep and never consumes a rate slot."""
+        for invalid in (False, True):
+            with self.subTest(invalid=invalid):
+                shutil.rmtree(
+                    os.path.join(self.storage, "origin"), ignore_errors=True
+                )
+                shutil.rmtree(
+                    os.path.join(self.storage, "target"), ignore_errors=True
+                )
+                _write_sim(self.storage, "origin")
+                with mock.patch.object(reverie, "Persona", _StepPersona):
+                    rs = reverie.ReverieServer("origin", "target")
+                rs.save = mock.Mock()
+                env0 = os.path.join(
+                    self.storage, "target", "environment", "0.json"
+                )
+                if invalid:
+                    with open(env0, "w") as f:
+                        json.dump(
+                            {"Isabella Rodriguez": {"x": "bad", "y": 0}}, f
+                        )
+                else:
+                    os.remove(env0)
+                clock = _PacingClock()
+                pacing = _PacingEvent(clock)
+                stop = threading.Event()
+                sleeps = []
+
+                def _sleep(seconds):
+                    sleeps.append(seconds)
+                    if len(sleeps) == 2:
+                        raise KeyboardInterrupt
+
+                with mock.patch.object(
+                    reverie.time, "sleep", side_effect=_sleep
+                ):
+                    with mock.patch.object(
+                        reverie, "install_shutdown_handlers"
+                    ):
+                        with mock.patch.object(
+                            reverie,
+                            "new_shutdown_event",
+                            side_effect=[pacing, stop],
+                        ):
+                            with mock.patch.object(
+                                reverie.time, "monotonic", clock.monotonic
+                            ):
+                                rs.serve_forever(autosave_interval=10)
+                self.assertEqual(sleeps, [0.1, 0.1])
+                self.assertEqual(pacing.waits, [])
+                self.assertEqual(rs.step, 0)
+                rs.save.assert_called_once()
+
+    def test_autosave_cadence_unchanged_during_pacing(self):
+        """Autosaves still fire every N steps while pacing holds."""
+        rs, clock, pacing, stop = self._paced_server(rate=0.4)
+        waits = {"count": 0}
+
+        def _stop_on_fourth_wait(event):
+            waits["count"] += 1
+            if waits["count"] == 4:
+                event.set()
+
+        pacing.on_wait = _stop_on_fourth_wait
+        self._serve_paced(
+            rs, pacing, stop, rate=0.4, autosave_interval=2
+        )
+        self.assertEqual(pacing.waits, [2.5, 2.5, 2.5, 2.5])
+        self.assertEqual(rs.step, 4)
+        self.assertEqual(rs.save.call_count, 3)
+
+    def test_heartbeat_continues_during_rate_pacing(self):
+        """The background publisher keeps beating while the main loop paces."""
+        rs, clock, pacing, stop = self._paced_server(rate=0.4)
+        pacing.real_hold = 0.2
+        waits = {"count": 0}
+
+        def _stop_on_second_wait(event):
+            waits["count"] += 1
+            if waits["count"] == 2:
+                event.set()
+
+        pacing.on_wait = _stop_on_second_wait
+        beats = mock.Mock()
+        with mock.patch.object(rs, "_publish_heartbeat", beats):
+            self._serve_paced(
+                rs,
+                pacing,
+                stop,
+                rate=0.4,
+                autosave_interval=100,
+                heartbeat_interval=0.05,
+            )
+        self.assertEqual(pacing.waits, [2.5, 2.5])
+        self.assertGreaterEqual(beats.call_count, 2)
+        self.assertEqual(rs.step, 2)
+        rs.save.assert_called_once()
+        self.assertFalse(
+            rs._heartbeat_thread.is_alive(), "heartbeat thread leaked"
+        )
+
+
+
 class _SavingPersona(_FakePersona):
     """Persona fake that persists a complete bootstrap for real saves."""
 
@@ -727,6 +1247,30 @@ class _SavingPersona(_FakePersona):
             with open(os.path.join(folder, name), "w") as f:
                 json.dump(payload, f)
 
+
+
+class _FeedingPersona(_StepPersona):
+    """Persona fake that feeds the next environment snapshot after moving.
+
+    ``serve_forever`` prunes future environment files, so the next snapshot
+    is written by the move itself; the loop then processes each step in
+    sequence without any external writer.
+    """
+
+    def __init__(self, name, folder):
+        super().__init__(name, folder)
+        self.env_dir = None
+        self.moved = 0
+
+    def move(self, maze, personas, tile, curr_time):
+        self.moved += 1
+        with open(
+            os.path.join(self.env_dir, f"{self.moved}.json"), "w"
+        ) as f:
+            json.dump(
+                {"Isabella Rodriguez": {"x": self.moved % 70, "y": 0}}, f
+            )
+        return (tile, "pronunciatio", "description")
 
 
 class SigtermDuringStepTests(unittest.TestCase):

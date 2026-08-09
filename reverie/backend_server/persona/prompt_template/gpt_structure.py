@@ -140,48 +140,73 @@ def _call_with_retries(provider, operation, func):
     ) from last_exception
 
 
+class _MalformedProviderResponse(Exception):
+    """Internal signal that a provider chat response failed validation."""
+
+
+def _chat_completion_content(client, **kwargs):
+    """Create a chat completion and return its validated string content.
+
+    Missing or empty choices, a missing message, and None, non-string, or
+    whitespace-only content raise ``_MalformedProviderResponse`` so that
+    ``_call_with_retries`` treats the response as retryable. Valid nonempty
+    string content is returned unchanged.
+    """
+    completion = client.chat.completions.create(**kwargs)
+    try:
+        content = completion.choices[0].message.content
+    except (AttributeError, IndexError, TypeError):
+        raise _MalformedProviderResponse from None
+    if not isinstance(content, str) or not content.strip():
+        raise _MalformedProviderResponse from None
+    return content
+
+
 def ChatGPT_single_request(prompt, persona=None):
     temp_sleep()
     provider, model = _resolve_model(persona)
     client = _get_client(provider)
-    completion = _call_with_retries(
+    kwargs: dict = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    kwargs.update(reasoning_effort_kwargs(provider, llm_reasoning_effort))
+    return _call_with_retries(
         provider,
         "chat",
-        lambda: client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-        ),
+        lambda: _chat_completion_content(client, **kwargs),
     )
-    return completion.choices[0].message.content
 
 
 def GPT4_request(prompt, persona=None):
     temp_sleep()
     provider, model = _resolve_model(persona)
     client = _get_client(provider)
-    completion = _call_with_retries(
+    kwargs: dict = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    kwargs.update(reasoning_effort_kwargs(provider, llm_reasoning_effort))
+    return _call_with_retries(
         provider,
         "chat",
-        lambda: client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-        ),
+        lambda: _chat_completion_content(client, **kwargs),
     )
-    return completion.choices[0].message.content
 
 
 def ChatGPT_request(prompt, persona=None):
     provider, model = _resolve_model(persona)
     client = _get_client(provider)
-    completion = _call_with_retries(
+    kwargs: dict = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    kwargs.update(reasoning_effort_kwargs(provider, llm_reasoning_effort))
+    return _call_with_retries(
         provider,
         "chat",
-        lambda: client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-        ),
+        lambda: _chat_completion_content(client, **kwargs),
     )
-    return completion.choices[0].message.content
 
 
 def GPT4_safe_generate_response(
@@ -306,7 +331,10 @@ def GPT_request(prompt, gpt_parameter, persona=None):
     """Legacy completion-style request normalized to chat completions.
 
     OpenRouter does not support text-davinci models, so we convert the
-    completion parameters to a chat-completions call internally.
+    completion parameters to a chat-completions call internally. The legacy
+    output limits ``max_tokens`` and ``stop`` are intentionally dropped;
+    every other legacy control (temperature, top_p, frequency/presence
+    penalties) still applies.
     """
     temp_sleep()
     provider, model = _resolve_model(persona, fallback_engine=gpt_parameter.get("engine"))
@@ -325,13 +353,8 @@ def GPT_request(prompt, gpt_parameter, persona=None):
         "model": model,
         "messages": messages,
         "temperature": gpt_parameter.get("temperature", 0),
-        "max_tokens": gpt_parameter.get("max_tokens", 50),
         "top_p": gpt_parameter.get("top_p", 1),
     }
-
-    stop_seq = gpt_parameter.get("stop")
-    if stop_seq and stop_seq != [""]:
-        kwargs["stop"] = stop_seq
 
     fp = gpt_parameter.get("frequency_penalty")
     if fp is not None:
@@ -340,12 +363,13 @@ def GPT_request(prompt, gpt_parameter, persona=None):
     if pp is not None:
         kwargs["presence_penalty"] = pp
 
-    completion = _call_with_retries(
+    kwargs.update(reasoning_effort_kwargs(provider, llm_reasoning_effort))
+
+    return _call_with_retries(
         provider,
         "chat",
-        lambda: client.chat.completions.create(**kwargs),
+        lambda: _chat_completion_content(client, **kwargs),
     )
-    return completion.choices[0].message.content
 
 
 def generate_prompt(curr_input, prompt_lib_file):
@@ -425,10 +449,16 @@ def get_embedding(text, model=None, persona=None):
     provider, _ = _resolve_model(persona)
     model = _resolve_embedding_model(provider, explicit=model)
     client = _get_client(provider)
+    kwargs: dict = {
+        "input": [text],
+        "model": model,
+    }
+    if provider == "openrouter":
+        kwargs["encoding_format"] = "float"
     response = _call_with_retries(
         provider,
         "embedding",
-        lambda: client.embeddings.create(input=[text], model=model),
+        lambda: client.embeddings.create(**kwargs),
     )
     return response.data[0].embedding
 

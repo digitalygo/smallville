@@ -173,6 +173,55 @@ llm_api_timeout_seconds: float = _parse_llm_api_timeout_seconds(
     os.getenv("LLM_API_TIMEOUT_SECONDS", "")
 )
 
+_VALID_REASONING_EFFORTS = frozenset(
+    {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+)
+
+_REASONING_EFFORT_ALLOWED = "none, minimal, low, medium, high, xhigh, max"
+
+
+def _parse_llm_reasoning_effort(raw: str) -> str | None:
+    """Parse LLM_REASONING_EFFORT as a normalized effort name or None.
+
+    Blank or whitespace-only values mean unset: reasoning arguments are
+    omitted and the provider's default reasoning applies. Valid values are
+    trimmed and lowercased. Unknown values fail fast with a sanitized error
+    naming the variable and the allowed values, never echoing the raw
+    input.
+    """
+    if not raw or not raw.strip():
+        return None
+    normalized = raw.strip().lower()
+    if normalized not in _VALID_REASONING_EFFORTS:
+        raise ValueError(
+            "Invalid LLM_REASONING_EFFORT. "
+            f"Allowed values: {_REASONING_EFFORT_ALLOWED}."
+        )
+    return normalized
+
+
+llm_reasoning_effort: str | None = _parse_llm_reasoning_effort(
+    os.getenv("LLM_REASONING_EFFORT", "")
+)
+
+
+def reasoning_effort_kwargs(provider: str, effort: str | None) -> dict[str, object]:
+    """Return provider-specific chat kwargs for reasoning effort, if configured.
+
+    An unset (``None`` or blank) effort yields no reasoning arguments, so the
+    provider's default reasoning applies. OpenRouter receives the nested
+    ``extra_body`` reasoning block; OpenAI receives the top-level
+    ``reasoning_effort`` parameter. Unknown providers fail closed via
+    ``_validate_provider``.
+    """
+    _validate_provider(provider)
+    if not effort:
+        return {}
+    if provider == "openrouter":
+        return {"extra_body": {"reasoning": {"effort": effort}}}
+    return {"reasoning_effort": effort}
+
+
 openrouter_referer = os.getenv(
     "OPENROUTER_REFERER", "https://github.com/digitalygo/smallville"
 )
@@ -193,3 +242,36 @@ fs_temp_storage = os.path.join(_frontend_server_dir, "temp_storage")
 collision_block_id = "32125"
 
 debug = os.getenv("DEBUG", "False").lower() in ("true", "1", "yes")
+
+
+def _parse_max_steps_per_second(raw: str) -> float:
+    """Parse REVERIE_MAX_STEPS_PER_SECOND as a finite float > 0, failing fast.
+
+    A blank or whitespace-only value yields the default 0.4. Malformed,
+    zero, negative, NaN, and infinite values raise ``ValueError`` naming
+    only the variable and its range, never echoing the raw input.
+    """
+    if not raw or not raw.strip():
+        return 0.4
+    try:
+        value = float(raw.strip())
+    except ValueError:
+        raise ValueError(
+            "Invalid REVERIE_MAX_STEPS_PER_SECOND: expected a finite "
+            "number > 0."
+        ) from None
+    if not math.isfinite(value):
+        raise ValueError(
+            "Invalid REVERIE_MAX_STEPS_PER_SECOND: must be a finite "
+            "number > 0."
+        )
+    if value <= 0:
+        raise ValueError(
+            "Invalid REVERIE_MAX_STEPS_PER_SECOND: must be > 0."
+        )
+    return value
+
+
+max_steps_per_second: float = _parse_max_steps_per_second(
+    os.getenv("REVERIE_MAX_STEPS_PER_SECOND", "")
+)
