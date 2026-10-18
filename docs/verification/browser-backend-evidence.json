@@ -1,0 +1,27 @@
+{
+  "backend_step": 3,
+  "simulation_time": "2023-02-13 00:00:30",
+  "movement_files": 3,
+  "provider_activity": {
+    "requests": 10,
+    "state": "idle",
+    "provider": "hetzner",
+    "operation": "chat",
+    "updated_at": 1792367149.429018,
+    "wait_seconds": 0
+  },
+  "provider_network_used": false,
+  "minimum_request_spacing_seconds": 6.100243330001831,
+  "request_starts": [
+    1792367094.5156183,
+    1792367100.6162825,
+    1792367106.7165718,
+    1792367112.8202488,
+    1792367118.9205096,
+    1792367125.0242496,
+    1792367131.1282306,
+    1792367137.2284806,
+    1792367143.328724,
+    1792367149.4290032
+  ]
+}

@@ -1,0 +1,67 @@
+{
+  "before": {
+    "step": 0,
+    "positions": {
+      "Isabella Rodriguez": [
+        72,
+        35
+      ],
+      "Klaus Mueller": [
+        74,
+        35
+      ],
+      "Maria Lopez": [
+        76,
+        35
+      ]
+    }
+  },
+  "during": {
+    "step": 0,
+    "positions": {
+      "Isabella Rodriguez": [
+        72,
+        35
+      ],
+      "Klaus Mueller": [
+        74,
+        35
+      ],
+      "Maria Lopez": [
+        76,
+        35
+      ]
+    },
+    "spriteX": 2322.742153846154
+  },
+  "after": {
+    "step": 2,
+    "positions": {
+      "Isabella Rodriguez": [
+        74,
+        35
+      ],
+      "Klaus Mueller": [
+        76,
+        35
+      ],
+      "Maria Lopez": [
+        78,
+        35
+      ]
+    },
+    "time": "February 13, 2023, 00:00:10",
+    "activity": "walking through the village"
+  },
+  "errors": [],
+  "external": [],
+  "badResponses": [],
+  "viewportWidths": [
+    1440,
+    390,
+    320
+  ],
+  "pauseVerified": true,
+  "dragAndZoomVerified": true,
+  "realMovementEndpointStatus": 200
+}

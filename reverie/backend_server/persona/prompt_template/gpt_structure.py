@@ -2,7 +2,7 @@
 Author: Joon Sung Park (joonspk@stanford.edu)
 
 File: gpt_structure.py
-Description: Wrapper functions for calling OpenAI / OpenRouter APIs.
+Description: Wrapper functions for calling OpenAI-compatible providers.
 """
 from __future__ import annotations
 
@@ -10,12 +10,27 @@ import json
 import os
 import random
 import time
+import threading
+from contextlib import nullcontext
 
 from openai import OpenAI
 
 from utils import *
+from provider_gate import SharedRequestGate, retry_after_seconds
 
 _clients: dict[str, OpenAI] = {}
+_activity_lock = threading.Lock()
+_activity = {"requests": 0, "state": "idle"}
+
+
+def request_activity():
+    with _activity_lock:
+        return dict(_activity)
+
+
+def _set_activity(**fields):
+    with _activity_lock:
+        _activity.update(fields, updated_at=time.time())
 
 
 def _get_client(provider: str) -> OpenAI:
@@ -24,7 +39,16 @@ def _get_client(provider: str) -> OpenAI:
     if provider in _clients:
         return _clients[provider]
 
-    if provider == "openrouter":
+    if provider == "hetzner":
+        if not hetzner_api_key.strip():
+            raise ValueError("HETZNER_API_KEY is required for Hetzner.")
+        client = OpenAI(
+            base_url="https://inference.hetzner.com/api/v1",
+            api_key=hetzner_api_key.strip(),
+            timeout=llm_api_timeout_seconds,
+            max_retries=0,
+        )
+    elif provider == "openrouter":
         client = OpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=openrouter_api_key,
@@ -51,9 +75,10 @@ def _get_client(provider: str) -> OpenAI:
 _DEFAULT_MODELS: dict[str, str] = {
     "openai": "gpt-4o",
     "openrouter": "openai/gpt-4o",
+    "hetzner": "Qwen3.8-27B",
 }
 
-_VALID_PROVIDERS = frozenset({"openai", "openrouter"})
+_VALID_PROVIDERS = frozenset({"openai", "openrouter", "hetzner"})
 
 
 def _validate_provider(provider: str) -> None:
@@ -90,7 +115,7 @@ def _resolve_model(persona=None, fallback_engine: str | None = None):
         name = getattr(persona.scratch, "name", None) if hasattr(persona, "scratch") else None
         if name and name in llm_persona_models:
             raw = llm_persona_models[name]
-            for known_prefix in ("openai:", "openrouter:"):
+            for known_prefix in ("openai:", "openrouter:", "hetzner:"):
                 if raw.startswith(known_prefix):
                     if not has_scratch_provider:
                         provider = known_prefix[:-1]
@@ -113,6 +138,32 @@ def temp_sleep(seconds=0.1):
     time.sleep(seconds)
 
 
+def _request_gate(provider):
+    if provider != "hetzner":
+        return nullcontext()
+    return SharedRequestGate(
+        hetzner_rate_limit_dir,
+        hetzner_api_key.strip(),
+        60 / hetzner_requests_per_minute + 0.1,
+    ).slot(on_wait=lambda seconds: _set_activity(state="queued", wait_seconds=round(seconds, 1)))
+
+
+def verify_hetzner_models(models):
+    def read_catalog():
+        catalog = _get_client("hetzner").models.list()
+        try:
+            available = {entry.id for entry in catalog.data}
+        except (AttributeError, TypeError):
+            raise _MalformedProviderResponse from None
+        if not all(isinstance(model, str) and model.strip() for model in available):
+            raise _MalformedProviderResponse
+        return available
+
+    available = _call_with_retries("hetzner", "models", read_catalog)
+    if not set(models) <= available:
+        raise ValueError("Configured Hetzner model is unavailable in the current catalog; no fallback is enabled.")
+
+
 def _call_with_retries(provider, operation, func):
     """Run ``func`` with bounded exponential retries.
 
@@ -128,13 +179,43 @@ def _call_with_retries(provider, operation, func):
     last_exception = None
     for attempt in range(total_attempts):
         try:
-            return func()
+            _set_activity(provider=provider, operation=operation, state="queued")
+            with _request_gate(provider):
+                with _activity_lock:
+                    _activity.update(
+                        provider=provider,
+                        operation=operation,
+                        state="requesting",
+                        requests=_activity["requests"] + 1,
+                        updated_at=time.time(),
+                    )
+                result = func()
+                _set_activity(state="idle", wait_seconds=0)
+                return result
         except (KeyboardInterrupt, SystemExit):
             raise
         except Exception as exc:
             last_exception = exc
+            _set_activity(state="retrying")
+            status = getattr(exc, "status_code", None)
+            if (
+                provider == "hetzner"
+                and status is not None
+                and 400 <= status < 500
+                and status not in (408, 429)
+            ):
+                total_attempts = attempt + 1
+                break
             if attempt < total_attempts - 1:
-                temp_sleep(llm_api_retry_base_seconds * (2 ** attempt))
+                delay = llm_api_retry_base_seconds * (2 ** attempt)
+                if provider == "hetzner":
+                    delay = max(
+                        min(delay, 60) + random.uniform(0, 0.25),
+                        retry_after_seconds(exc) or 0,
+                    )
+                    _set_activity(state="queued", wait_seconds=round(delay, 1))
+                temp_sleep(delay)
+    _set_activity(state="failed")
     raise LLMProviderError(
         provider=provider, operation=operation, attempts=total_attempts
     ) from last_exception
@@ -431,7 +512,19 @@ def _resolve_embedding_model(provider: str, explicit: str | None = None) -> str:
         return llm_embedding_models[provider]
     if llm_embedding_model:
         return llm_embedding_model
-    return _EMBEDDING_MODELS.get(provider, "text-embedding-ada-002")
+    return _EMBEDDING_MODELS[provider]
+
+
+def _resolve_embedding_provider(persona=None):
+    provider = llm_embedding_provider or _resolve_model(persona)[0]
+    if provider == "hetzner":
+        raise ValueError(
+            "Hetzner does not advertise embeddings. Explicitly configure "
+            "LLM_EMBEDDING_PROVIDER=openai or openrouter and its model/key; "
+            "no embedding fallback is enabled."
+        )
+    _validate_provider(provider)
+    return provider
 
 
 def get_embedding(text, model=None, persona=None):
@@ -446,7 +539,7 @@ def get_embedding(text, model=None, persona=None):
     text = text.replace("\n", " ")
     if not text:
         text = "this is blank"
-    provider, _ = _resolve_model(persona)
+    provider = _resolve_embedding_provider(persona)
     model = _resolve_embedding_model(provider, explicit=model)
     client = _get_client(provider)
     kwargs: dict = {

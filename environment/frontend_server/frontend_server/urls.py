@@ -29,6 +29,7 @@ urlpatterns = [
     path("path_tester/", translator_views.path_tester, name="path_tester"),
     path("path_tester_update/", translator_views.path_tester_update, name="path_tester_update"),
     path("health/", translator_views.health, name="health"),
+    path("runtime_status/", translator_views.runtime_status, name="runtime_status"),
     path("admin/", admin.site.urls),
     path("accounts/", include("django.contrib.auth.urls")),
 ]

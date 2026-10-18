@@ -10,10 +10,12 @@ instead of uncaught 500s.
 import datetime
 import fcntl
 import json
+import math
 import os
 import re
 import stat
 import tempfile
+import time
 import uuid
 from contextlib import contextmanager
 
@@ -23,6 +25,7 @@ from django.http import HttpResponse, JsonResponse
 from django.shortcuts import render
 from django.views.decorators.csrf import csrf_protect
 from django.views.decorators.http import require_GET, require_POST
+from django.views.decorators.cache import never_cache
 
 from global_methods import *
 
@@ -2025,3 +2028,40 @@ def path_tester_update(request):
 def health(request):
     """Simple health check endpoint."""
     return JsonResponse({"status": "ok"})
+
+
+@login_required
+@require_GET
+@never_cache
+def runtime_status(request):
+    """Return only public progress fields from the current leased backend."""
+    try:
+        with _runtime_lock():
+            if not _backend_lease_held():
+                return _service_unavailable("Backend unavailable")
+            sim_code = _read_expected_sim_code()
+            heartbeat = _read_runtime_marker("backend_heartbeat.json")
+            if not sim_code or request.GET.get("sim_code") != sim_code:
+                return _conflict("Simulation changed")
+            if not heartbeat or heartbeat.get("sim_code") != sim_code:
+                return _service_unavailable("Backend heartbeat unavailable")
+            timestamp = heartbeat.get("timestamp")
+            if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)) or not math.isfinite(timestamp) or not -5 <= time.time() - timestamp <= 15:
+                return _service_unavailable("Backend heartbeat stale")
+            step = _validate_step(str(heartbeat.get("step")))
+    except (ValueError, OSError):
+        return _service_unavailable("Backend status unavailable")
+    activity = heartbeat.get("provider_activity", {})
+    public_activity = {}
+    if isinstance(activity, dict):
+        for field, allowed in (
+            ("provider", {"openai", "openrouter", "hetzner"}),
+            ("operation", {"chat", "embedding", "models"}),
+            ("state", {"idle", "queued", "requesting", "retrying", "failed"}),
+        ):
+            if isinstance(activity.get(field), str) and activity[field] in allowed:
+                public_activity[field] = activity[field]
+        count = activity.get("requests")
+        if type(count) is int and count >= 0:
+            public_activity["requests"] = count
+    return JsonResponse({"status": "alive", "step": step, "provider_activity": public_activity})

@@ -1861,6 +1861,8 @@ class ReverieServer:
             "timestamp": time.time(),
             "pid": os.getpid(),
         }
+        from persona.prompt_template.gpt_structure import request_activity
+        payload["provider_activity"] = request_activity()
         with runtime_lock(_runtime_lock_path()):
             atomic_write_json_beneath(
                 fs_temp_storage, (), "backend_heartbeat.json", payload
@@ -2268,6 +2270,8 @@ def _provider_key(provider):
         raw = openrouter_api_key
     elif provider == "openai":
         raw = openai_api_key
+    elif provider == "hetzner":
+        raw = hetzner_api_key
     else:
         return ""
     key = raw.strip()
@@ -2280,26 +2284,39 @@ def _validate_provider_keys(personas):
     """Fail fast when any provider in use lacks its API key.
 
     Resolves the effective provider for the global default and every loaded
-    persona, then requires the matching ``OPENROUTER_API_KEY`` or
-    ``OPENAI_API_KEY``. Unknown providers fail closed. Key values are never
-    exposed in error messages.
+    persona, then requires the matching provider and explicit embedding
+    keys. Hetzner also verifies its model catalog before runtime markers
+    are published. Key values are never exposed in error messages.
     """
     from persona.prompt_template import gpt_structure
 
     providers = set()
-    provider, _ = gpt_structure._resolve_model(None)
+    hetzner_models = set()
+    provider, model = gpt_structure._resolve_model(None)
     providers.add(provider)
+    if provider == "hetzner":
+        hetzner_models.add(model)
+        providers.add(gpt_structure._resolve_embedding_provider())
+        reasoning_effort_kwargs(provider, llm_reasoning_effort)
+    if llm_embedding_provider:
+        providers.add(llm_embedding_provider)
     for persona in personas.values():
-        provider, _ = gpt_structure._resolve_model(persona)
+        provider, model = gpt_structure._resolve_model(persona)
         providers.add(provider)
+        if provider == "hetzner":
+            hetzner_models.add(model)
+            providers.add(gpt_structure._resolve_embedding_provider(persona))
+            reasoning_effort_kwargs(provider, llm_reasoning_effort)
 
     missing = sorted(p for p in providers if not _provider_key(p))
     if missing:
         raise ValueError(
             "Missing API key for provider(s): "
             + ", ".join(missing)
-            + ". Set OPENROUTER_API_KEY or OPENAI_API_KEY."
+            + ". Set the matching OPENROUTER_API_KEY, OPENAI_API_KEY or HETZNER_API_KEY."
         )
+    if hetzner_models:
+        gpt_structure.verify_hetzner_models(hetzner_models)
 
 
 def _parse_args():

@@ -78,42 +78,22 @@
 	// Configuration meant to be passed to the main Phaser game instance. 
 	const config = {
 	  type: Phaser.AUTO,
-	  width: 1500,
-	  height: 800,
+	  width: 1200,
+	  height: 700,
+	  scale: { mode: Phaser.Scale ? Phaser.Scale.FIT : 0, autoCenter: Phaser.Scale ? Phaser.Scale.CENTER_BOTH : 0 },
 	  parent: "game-container",
 	  pixelArt: true,
 	  fps: { target: simulatorTargetFps },
-	  physics: {
-	    default: "arcade",
-	    arcade: {
-	      gravity: { y: 0 } } },
 	  scene: {
 	    preload: preload,
 	    create: create,
 	    update: update } };
 
-	// const config = {
-	//   type: Phaser.AUTO,
-	//   width: 4480,
-	//   height: 3200,
-	//   parent: "game-container",
-	//   pixelArt: true,
-	//   physics: {
-	//     default: "arcade",
-	//     arcade: {
-	//       gravity: { y: 0 } } },
-	//   scene: {
-	//     preload: preload,
-	//     create: create,
-	//     update: update },
-	//   scale: {zoom: 0.5} };
 
 	// Creating the game instance and setting up the main Phaser variables that  
 	// will be used in it. 
 	const game = new Phaser.Game(config);
 	let cursors;
-	let player;
-	let showDebug = false;
 
 	// Persona related variables. This should have the name of the persona as its 
 	// keys, and the instances of the Persona class as the values.
@@ -128,17 +108,22 @@
 
 	var personas = {};
 	var pronunciatios = {};
-	let anims_direction;
-	let pre_anims_direction;
-	let pre_anims_direction_dict = {};
 
 	let curr_maze = "the_ville";
 
 	// <tile_width> is the width of one individual tile (tiles are square)
 	let tile_width = 32;
-	// Important: tile_width % movement_speed has to be 0. 
-	// <movement_speed> determines how fast we move at each upate cylce. 
-	let movement_speed = 32; 
+	const movementDuration = 650;
+	let motionElapsed = 0;
+	let motionStarted = false;
+	let movement_start = {};
+	let logicalPositions = Object.fromEntries(Object.entries(persona_names).map(([name, tile]) => [name, [...tile]]));
+	let followedPersona = null;
+	let mapScene;
+	let mapBounds;
+	let paused = false;
+	let waitingSince = Date.now();
+	let statusMessage = "Loading map";
 
 	// <phase> -- there are three phases: "process," "update," and "execute."
 	let phase = !initialStepIsValid || step === terminalStep ? "complete" : simulatorMode === "simulate" && (initialPhase === "process" || initialPhase === "update") ? initialPhase : "update";
@@ -160,8 +145,7 @@
 
 	// Variables for storing movements that are sent from the backend server.
 	let execute_movement;
-	let execute_count_max = tile_width/movement_speed;
-	let execute_count = execute_count_max;
+
 	let movement_target = {};
 
 	function setText(id, text) {
@@ -169,11 +153,83 @@
 		if (el) el.textContent = text;
 	}
 
+	function setStatus(message) {
+		if (paused && !message.startsWith("Paused")) message = "Paused · " + message;
+		statusMessage = message;
+		setText("simulation-status", message);
+		setText("step-content", String(step));
+	}
+
+	let statusPollAt = 0;
+	let statusPollInFlight = false;
+	async function pollRuntimeStatus() {
+		statusPollInFlight = true;
+		try {
+			const response = await fetch("{% url 'runtime_status' %}?sim_code=" + encodeURIComponent(sim_code), {credentials: "same-origin", cache: "no-store", signal: AbortSignal.timeout(30000)});
+			if (!response.ok) {
+				setText("provider-progress", "Backend status unavailable · checking again shortly");
+				return;
+			}
+			const status = await response.json();
+			const activity = status.provider_activity || {};
+			setText("provider-progress", "Backend connected · " + (activity.provider ? activity.provider + " " + (activity.operation || "") + " · " + activity.state + " · " + (activity.requests || 0) + " requests attempted" : "waiting for environment"));
+		} catch {
+			setText("provider-progress", "Backend status connection interrupted · retrying");
+		} finally {
+			statusPollAt = Date.now() + 5000;
+			statusPollInFlight = false;
+		}
+	}
+
+	function focusPersona(name) {
+		if (!mapScene || !personas[name]) return;
+		followedPersona = name;
+		mapScene.cameras.main.useBounds = true;
+		mapScene.cameras.main.setZoom(1.6);
+		mapScene.cameras.main.startFollow(personas[name], true, 1, 1);
+		setText("camera-status", "Following " + name);
+		updateFollowButtons();
+	}
+
+	function updateFollowButtons() {
+		for (const resident of Object.keys(personas)) {
+			const button = document.getElementById("focus__" + resident.replace(/ /g, "_"));
+			if (button) button.setAttribute("aria-pressed", String(resident === followedPersona));
+		}
+	}
+
+	function fitMap() {
+		if (!mapScene) return;
+		followedPersona = null;
+		updateFollowButtons();
+		const camera = mapScene.cameras.main;
+		camera.stopFollow();
+		camera.setBackgroundColor("#d7e5be");
+		camera.useBounds = false;
+		camera.setZoom(Math.min(camera.width / mapBounds.width, camera.height / mapBounds.height));
+		camera.centerOn(mapBounds.width / 2, mapBounds.height / 2);
+		setText("camera-status", "Whole town");
+	}
+
+	function zoomMap(factor) {
+		if (!mapScene) return;
+		const camera = mapScene.cameras.main;
+		camera.setZoom(Math.max(0.2, Math.min(3, camera.zoom * factor)));
+		camera.useBounds = camera.displayWidth <= mapBounds.width && camera.displayHeight <= mapBounds.height;
+	}
+
+	function formatDestination(address) {
+		const waiting = /^<waiting>\s+(\d+)\s+(\d+)$/.exec(address);
+		if (waiting) return "Near tile " + waiting[1] + ", " + waiting[2];
+		if (address.includes("<persona>")) return "With " + address.split("<persona>").pop().trim();
+		return address.split(":").map(part => part.trim()).filter(part => part && !/^the[_ ]ville$/i.test(part)).map(part => part.replace("<random>", "Exploring")).join(" · ") || "No destination reported";
+	}
+
 	function renderChat(elementId, chatRaw) {
 		let el = document.getElementById(elementId);
 		if (!el) return;
 		el.innerHTML = "";
-		if (chatRaw == null) {
+		if (chatRaw == null || chatRaw.length === 0) {
 			let em = document.createElement("em");
 			em.textContent = "None at the moment";
 			el.appendChild(em);
@@ -191,6 +247,13 @@
 		return Math.min(retryBaseDelay * (2 ** attempts), retryMaxDelay);
 	}
 
+	function sessionUnavailable(response) {
+		if (response.status !== 401 && response.status !== 403 && !response.redirected) return false;
+		stopSimulator();
+		setStatus("Session unavailable · reload and sign in again");
+		return true;
+	}
+
 	function isExecutableStep(value) {
 		return Number.isSafeInteger(value) && value >= 0 && value < terminalStep;
 	}
@@ -198,6 +261,7 @@
 	function stopSimulator() {
 		phase = "complete";
 		replayComplete = true;
+		setStatus(simulatorMode === "replay" ? "Replay complete" : "Simulation complete");
 		environmentRetryAt = Infinity;
 		movementPollRetryAt = Infinity;
 	}
@@ -230,14 +294,17 @@
 		if (movement["<step>"] !== expectedStep) return false;
 		if (!movement.meta || typeof movement.meta !== "object" || Array.isArray(movement.meta)) return false;
 		if (!("curr_time" in movement.meta)) return false;
+		if (typeof movement.meta.curr_time !== "string" || !movement.meta.curr_time.trim()) return false;
 		if (!movement.persona || typeof movement.persona !== "object" || Array.isArray(movement.persona)) return false;
 
 		for (let i = 0; i < Object.keys(personas).length; i++) {
 			let personaName = Object.keys(personas)[i];
 			let personaMovement = movement.persona[personaName];
 			if (!personaMovement || typeof personaMovement !== "object" || Array.isArray(personaMovement)) return false;
-			if (!Array.isArray(personaMovement.movement) || personaMovement.movement.length < 2) return false;
+			if (!Array.isArray(personaMovement.movement) || personaMovement.movement.length !== 2) return false;
 			if (!Number.isFinite(personaMovement.movement[0]) || !Number.isFinite(personaMovement.movement[1])) return false;
+			if (!personaMovement.movement.every(value => Number.isSafeInteger(value) && value >= 0)) return false;
+			if (mapBounds && (personaMovement.movement[0] * tile_width >= mapBounds.width || personaMovement.movement[1] * tile_width >= mapBounds.height)) return false;
 			if (typeof personaMovement.pronunciatio !== "string" || typeof personaMovement.description !== "string") return false;
 			if (personaMovement.chat !== null && (!Array.isArray(personaMovement.chat) || !personaMovement.chat.every((entry) => Array.isArray(entry) && entry.length >= 2))) return false;
 		}
@@ -250,8 +317,10 @@
 		if (resyncInProgress) return;
 		if (phase === "complete" || !isExecutableStep(postedStep)) return;
 		environmentPostInFlight = true;
+		setStatus("Publishing positions for step " + postedStep);
 		try {
 			let response = await fetch(processEnvironmentUrl, {
+				signal: AbortSignal.timeout(30000),
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
@@ -260,15 +329,18 @@
 				credentials: "same-origin",
 				body: JSON.stringify(data)
 			});
+			if (sessionUnavailable(response)) return;
 			if (response.status === 409) {
 				requestResync();
 				return;
 			}
 			if (response.status === 503) {
+				setStatus("Backend unavailable · retrying positions");
 				scheduleEnvironmentRetry();
 				return;
 			}
 			if (!response.ok) {
+				setStatus("Position request failed (HTTP " + response.status + ") · retrying");
 				scheduleEnvironmentRetry();
 				return;
 			}
@@ -278,8 +350,11 @@
 				movementPollRetryAt = 0;
 				movementPollRetryAttempts = 0;
 				phase = "update";
+				waitingSince = Date.now();
+				setStatus("Waiting for backend planning · step " + step);
 			}
 		} catch {
+			setStatus("Connection interrupted · retrying positions");
 			scheduleEnvironmentRetry();
 		} finally {
 			environmentPostInFlight = false;
@@ -292,6 +367,7 @@
 		movementPollInFlight = true;
 		try {
 			let response = await fetch(movementUpdateUrl, {
+				signal: AbortSignal.timeout(30000),
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
@@ -300,6 +376,7 @@
 				credentials: "same-origin",
 				body: JSON.stringify({"step": pollStep, "sim_code": sim_code})
 			});
+			if (sessionUnavailable(response)) return;
 			if (response.status === 409 && simulatorMode === "simulate") {
 				let resync;
 				try {
@@ -315,7 +392,13 @@
 				return;
 			}
 			if (response.status === 503) {
+				setStatus("Backend unavailable · retrying movement");
 				if (phase === "update" && step === pollStep) scheduleMovementPollRetry();
+				return;
+			}
+			if (response.status === 202) {
+				setStatus("Waiting for " + (simulatorMode === "replay" ? "recorded movement" : "backend planning") + " · step " + step + " · " + Math.floor((Date.now() - waitingSince) / 1000) + "s elapsed");
+				scheduleMovementPollRetry();
 				return;
 			}
 			let movement;
@@ -331,19 +414,25 @@
 				return;
 			}
 			if (!response.ok) {
+				setStatus("Movement request failed (HTTP " + response.status + ") · retrying");
 				if (phase === "update" && step === pollStep) scheduleMovementPollRetry();
 				return;
 			}
 			if (phase !== "update" || step !== pollStep) return;
 			if (!isReadyMovement(movement, pollStep)) {
+				setStatus("Movement data incomplete · retrying step " + step);
 				scheduleMovementPollRetry();
 				return;
 			}
 			execute_movement = movement;
+			motionElapsed = 0;
+			motionStarted = false;
+			setStatus("Playing step " + step);
 			movementPollRetryAt = 0;
 			movementPollRetryAttempts = 0;
 			phase = "execute";
 		} catch {
+			setStatus("Connection interrupted · retrying movement");
 			if (phase === "update" && step === pollStep) scheduleMovementPollRetry();
 		} finally {
 			movementPollInFlight = false;
@@ -369,6 +458,7 @@
 	//         update() is called on each frame during the game play 
 
 	function preload() {  
+	  this.load.on("loaderror", () => setStatus("Map asset unavailable · check static file serving and reload"));
 	  // Loading the necessary images (e.g., the background image, character 
 	  // sprites). 
 
@@ -405,9 +495,12 @@
 	  // see: https://labs.phaser.io/view.html?src=src/animation/single%20sprite%20sheet.js
 	  // Joon: Technically, I think this guy had the best tutorial for atlas: 
 	  //       https://www.youtube.com/watch?v=fdXcD9X4NrQ&ab_channel=MorganPage
-	  this.load.atlas("atlas", 
-	                  "https://mikewesthad.github.io/phaser-3-tilemap-blog-posts/post-1/assets/atlas/atlas.png", 
-	                  "https://mikewesthad.github.io/phaser-3-tilemap-blog-posts/post-1/assets/atlas/atlas.json");
+	  this.load.atlas("atlas", "{% static 'assets/characters/Yuriko_Yamamoto.png' %}", "{% static 'assets/characters/atlas.json' %}");
+	  const characterRoot = "{% static 'assets/characters/' %}";
+	  for (const name of Object.keys(persona_names)) {
+		  this.load.atlas(name, characterRoot + encodeURIComponent(name.replace(/ /g, "_")) + ".png", characterRoot + "atlas.json");
+	  }
+
 	}
 
 	function create() {  
@@ -484,94 +577,50 @@
 	  // foregroundL1Layer.setDepth(2);
 	  // foregroundL1Layer.setDepth(2);
 
-	  // *** SET UP CAMERA *** 
-	  // "player" is to be set as the center of mass for our "camera." We 
-	  // basically create a game character sprite as we would for our personas 
-	  // but we move it to depth -1 and let it pass through the collision map;  
-	  // that is, do not have the following line: 
-	  // this.physics.add.collider(player, collisionsLayer);
-	  // OLD NOTE: Create a sprite with physics enabled via the physics system. 
-	  // The image  used for the sprite has a bit of whitespace, so I'm using 
-	  // setSize & setOffset to control the size of the player's body.
-	  player = this.physics.add.
-	                sprite(800, 288, "atlas", "misa-front").
-	                setSize(30, 40).
-	                setOffset(0, 0);
-	  player.setDepth(-1);
-	  // Setting up the camera. 
+	  mapScene = this;
+	  mapBounds = { width: map.widthInPixels, height: map.heightInPixels };
 	  const camera = this.cameras.main;
-	  camera.startFollow(player);
+	  camera.setBackgroundColor("#d7e5be");
 	  camera.setBounds(0, 0, map.widthInPixels, map.heightInPixels);
 	  cursors = this.input.keyboard.createCursorKeys();
-
-	  // *** SET UP PERSONAS *** 
-	  // We start by creating the game sprite objects. 
-	  for (let i=0; i<Object.keys(spawn_tile_loc).length; i++) { 
-	    let persona_name = Object.keys(spawn_tile_loc)[i];
-	    let start_pos = [spawn_tile_loc[persona_name][0] * tile_width + tile_width / 2, 
-	                     spawn_tile_loc[persona_name][1] * tile_width + tile_width];
-	    let new_sprite = this.physics.add
-	                         .sprite(start_pos[0], start_pos[1], "atlas", "misa-front")
-	                         .setSize(30, 40)
-	                         .setOffset(0, 32); // DEBUG 1 --- I added 32 offset on Dec 29. 
-	    // Here, we are creating the persona and its pronunciatio sprites.
-	    personas[persona_name] = new_sprite;
-	    pronunciatios[persona_name] = this.add.text(
-	                                   new_sprite.body.x - 6, 
-	                                   new_sprite.body.y - 42 - 32, // DEBUG 1 --- I added 32 offset on Dec 29. 
-	                                   "🦁", {
-	                                   font: "28px monospace", 
-	                                   fill: "#000000", 
-	                                   padding: { x: 8, y: 8}, 
-	                                   backgroundColor: "#ffffff",
-	                                   border:"solid",
-	                                   borderRadius:"10px"}).setDepth(3);
+	  let dragStart = null;
+	  this.input.on("pointerdown", pointer => {
+		camera.stopFollow();
+		followedPersona = null;
+		updateFollowButtons();
+		dragStart = {x:pointer.x, y:pointer.y, scrollX:camera.scrollX, scrollY:camera.scrollY};
+		setText("camera-status", "Exploring town");
+	  });
+	  this.input.on("pointermove", pointer => {
+		if (!pointer.isDown || !dragStart) return;
+		camera.setScroll(dragStart.scrollX - (pointer.x - dragStart.x) / camera.zoom, dragStart.scrollY - (pointer.y - dragStart.y) / camera.zoom);
+	  });
+	  for (const [name, tile] of Object.entries(spawn_tile_loc)) {
+		  const texture = this.textures.exists(name) ? name : "atlas";
+		  const sprite = this.add.sprite(tile[0] * tile_width + 16, tile[1] * tile_width + 32, texture, "down").setOrigin(0.5, 1).setDepth(1);
+		  personas[name] = sprite;
+		  pronunciatios[name] = this.add.text(sprite.x, sprite.y - 54, name.split(" ").map(part => part[0]).join(""), {
+			  font: "12px sans-serif", fill: "#163c32", backgroundColor: "#ffffff", padding: {x: 5, y: 3}
+		  }).setOrigin(0.5, 1).setDepth(3);
+		  for (const direction of ["left", "right", "up", "down"]) {
+			  this.anims.create({key: name + "-" + direction, frames: this.anims.generateFrameNames(texture, {prefix: direction + "-walk.", start: 0, end: 3, zeroPad: 3}), frameRate: 8, repeat: -1});
+		  }
+		  const id = name.replace(/ /g, "_");
+		  setText("position__" + id, tile.join(", "));
+		  const button = document.getElementById("focus__" + id);
+		  if (button) button.onclick = () => focusPersona(name);
 	  }
-
-	  // Create the player's walking animations from the texture atlas. These are
-	  // stored in the global animation manager so any sprite can access them.
-	  const anims = this.anims;
-	  anims.create({
-	    key: "misa-left-walk",
-	    frames: anims.generateFrameNames("atlas", { prefix: "misa-left-walk.", start: 0, end: 3, zeroPad: 3 }),
-	    frameRate: 4,
-	    repeat: -1 });
-
-	  anims.create({
-	    key: "misa-right-walk",
-	    frames: anims.generateFrameNames("atlas", { prefix: "misa-right-walk.", start: 0, end: 3, zeroPad: 3 }),
-	    frameRate: 4,
-	    repeat: -1 });
-
-	  anims.create({
-	    key: "misa-front-walk",
-	    frames: anims.generateFrameNames("atlas", { prefix: "misa-front-walk.", start: 0, end: 3, zeroPad: 3 }),
-	    frameRate: 4,
-	    repeat: -1 });
-
-	  anims.create({
-	    key: "misa-back-walk",
-	    frames: anims.generateFrameNames("atlas", { prefix: "misa-back-walk.", start: 0, end: 3, zeroPad: 3 }),
-	    frameRate: 4,
-	    repeat: -1 });
+	  document.getElementById("fit-map").onclick = fitMap;
+	  document.getElementById("zoom-in").onclick = () => zoomMap(1.25);
+	  document.getElementById("zoom-out").onclick = () => zoomMap(0.8);
+	  play_button.onclick = () => { paused = false; setStatus(statusMessage.replace("Paused · ", "")); };
+	  pause_button.onclick = () => { paused = true; setStatus("Paused · step " + step); };
+	  fitMap();
+	  setStatus(simulatorMode === "replay" ? "Loading recorded movement" : "Waiting for backend planning · step " + step);
 	}
 
 
 	function update(time, delta) {
-		// *** SETUP PLAY AND PAUSE BUTTON *** 
-		let play_context = this;
-		function game_resume() {  
-			play_context.scene.resume();
-		}  
-		play_button.onclick = function(){
-			game_resume();
-		};
-		function game_pause() {  
-			play_context.scene.pause();
-		}  
-		pause_button.onclick = function(){
-			game_pause();
-		};
 
 	  if (!initialStepIsValid) {
 	    failToStartSimulator();
@@ -586,27 +635,20 @@
 	    return;
 	  }
 	  if (resyncInProgress) return;
-	  if (phase === "complete") return;
-
-	  // *** MOVE CAMERA *** 
-	  // This is where we finish up the camera setting we started in the create() 
-	  // function. We set the movement speed of the camera and wire up the keys to
-	  // map to the actual movement.
-	  const camera_speed = 400;
-	  // Stop any previous movement from the last frame
-	  player.body.setVelocity(0);
-	  if (cursors.left.isDown) {
-	    player.body.setVelocityX(-camera_speed);
-	  } 
-	  if (cursors.right.isDown) {
-	    player.body.setVelocityX(camera_speed);
-	  } 
-	  if (cursors.up.isDown) {
-	    player.body.setVelocityY(-camera_speed);
-	  } 
-	  if (cursors.down.isDown) {
-	    player.body.setVelocityY(camera_speed);
+	  if (simulatorMode === "simulate" && !statusPollInFlight && Date.now() >= statusPollAt && document.getElementById("provider-progress")) void pollRuntimeStatus();
+	  const camera_speed = 400 * Math.min(delta || 0, 100) / 1000;
+	  if (mapScene && (cursors.left.isDown || cursors.right.isDown || cursors.up.isDown || cursors.down.isDown)) {
+		const camera = mapScene.cameras.main;
+		if (followedPersona) {
+			camera.stopFollow();
+			followedPersona = null;
+			updateFollowButtons();
+		}
+		camera.scrollX += ((cursors.right.isDown ? 1 : 0) - (cursors.left.isDown ? 1 : 0)) * camera_speed / camera.zoom;
+		camera.scrollY += ((cursors.down.isDown ? 1 : 0) - (cursors.up.isDown ? 1 : 0)) * camera_speed / camera.zoom;
+		setText("camera-status", "Exploring town");
 	  }
+	  if (phase === "complete" || paused) return;
 
 	  // console.log("phase: " + phase + ", step: " + step);
 	  // *** MOVE PERSONAS ***
@@ -623,8 +665,8 @@
 	    for (let i=0; i<Object.keys(personas).length; i++) {
 	      let persona_name = Object.keys(personas)[i];
 	      data["environment"][persona_name] = {"maze": curr_maze,
-	                                           "x": Math.ceil((personas[persona_name].body.position.x) / tile_width),
-	                                           "y": Math.ceil((personas[persona_name].body.position.y) / tile_width)}
+	                                           "x": logicalPositions[persona_name][0],
+	                                           "y": logicalPositions[persona_name][1]}
 	    }
 	    if (!environmentPostInFlight && Date.now() >= environmentRetryAt) {
 	      void postEnvironment(data, step);
@@ -644,118 +686,52 @@
 	  } 
 
 	  else if (phase === "execute") {
-	    // This is where we actually move the personas in the visual world. Each
-	    // backend computation in execute_movement moves each persona by one tile
-	    // (or some personas might not move if they choose not to). 
-	    // The execute_count_max is computed by tile_width/movement_speed, which
-	    // defines a one step sequence in this world. 
-	    document.getElementById("game-time-content").textContent = execute_movement["meta"]["curr_time"];
-	    for (let i=0; i<Object.keys(personas).length; i++) {
-	      let curr_persona_name = Object.keys(personas)[i];
-	      let curr_persona = personas[curr_persona_name];
-	      let curr_pronunciatio = pronunciatios[Object.keys(personas)[i]];
-
-	      if (execute_count == execute_count_max) { 
-	        let curr_x = execute_movement["persona"][curr_persona_name]["movement"][0];
-	        let curr_y = execute_movement["persona"][curr_persona_name]["movement"][1];
-	        movement_target[curr_persona_name] = [curr_x * tile_width, 
-	                                              curr_y * tile_width]; 
-	        let pronunciatio_content = execute_movement["persona"][curr_persona_name]["pronunciatio"];
-	        // This is what gives the pronunciatio balloon the name initials. We 
-	        // use regex to extract the initials of the personas. 
-	        // E.g., "Dolores Murphy" -> "DM"
-	        let rgx = new RegExp(/(\p{L}{1})\p{L}+/, 'gu');
-	        let initials = [...curr_persona_name.matchAll(rgx)] || [];
-	        initials = (
-	          (initials.shift()?.[1] || '') + (initials.pop()?.[1] || '')
-	        ).toUpperCase();
-	        pronunciatios[curr_persona_name].setText(initials + ": " + pronunciatio_content);
-	      }
-
-	      if (execute_count > 0) {
-	        if (curr_persona.body.x < movement_target[curr_persona_name][0]) {
-	          curr_persona.body.x += movement_speed; 
-	          anims_direction = "r";
-	          pre_anims_direction = "r"
-	          pre_anims_direction_dict[curr_persona_name] = "r"
-	        } else if (curr_persona.body.x > movement_target[curr_persona_name][0]) {
-	          curr_persona.body.x -= movement_speed; 
-	          anims_direction = "l";
-	          pre_anims_direction = "l"
-	          pre_anims_direction_dict[curr_persona_name] = "l"
-	        } else if (curr_persona.body.y < movement_target[curr_persona_name][1]) {
-	          curr_persona.body.y += movement_speed;
-	          anims_direction = "d";
-	          pre_anims_direction = "d"
-	          pre_anims_direction_dict[curr_persona_name] = "d"
-	        } else if (curr_persona.body.y > movement_target[curr_persona_name][1]) {
-	          curr_persona.body.y -= movement_speed;
-	          anims_direction = "u";
-	          pre_anims_direction = "u"
-	          pre_anims_direction_dict[curr_persona_name] = "u"
-	        } else {
-	        	anims_direction = "";
-	        }
-
-	        curr_pronunciatio.x = curr_persona.body.x - 6; 
-          curr_pronunciatio.y = curr_persona.body.y - 42 - 32; // DEBUG 1 --- I added 32 offset on Dec 29. 
-
-          if (anims_direction == "l") {
-			      curr_persona.anims.play("misa-left-walk", true);
-			    } else if (anims_direction == "r") {
-			      curr_persona.anims.play("misa-right-walk", true);
-			    } else if (anims_direction == "u") {
-			      curr_persona.anims.play("misa-back-walk", true);
-			    } else if (anims_direction == "d") {
-			      curr_persona.anims.play("misa-front-walk", true);
-			    } else {
-			      curr_persona.anims.stop();
-
-			      // If we were moving, pick an idle frame to use
-			      if (pre_anims_direction_dict[curr_persona_name] == "l") curr_persona.setTexture("atlas", "misa-left");else
-			      if (pre_anims_direction_dict[curr_persona_name] == "r") curr_persona.setTexture("atlas", "misa-right");else
-			      if (pre_anims_direction_dict[curr_persona_name] == "u") curr_persona.setTexture("atlas", "misa-back");else
-			      if (pre_anims_direction_dict[curr_persona_name] == "d") curr_persona.setTexture("atlas", "misa-front");
-			    };
-
-	      } 
-	      else {
-	        // Once we are done moving the personas, we move on to the "process"
-	        // stage where we will send the current locations of all personas at the
-	        // end of the movemments to the frontend server, and then the backend.
-	        for (let i=0; i<Object.keys(personas).length; i++) {
-	          let curr_persona_name = Object.keys(personas)[i]
-	          let curr_persona = personas[curr_persona_name];
-	          curr_persona.body.x = movement_target[curr_persona_name][0];
-	          curr_persona.body.y = movement_target[curr_persona_name][1];
-	        }
-	        if (step === lastExecutableStep) {
-	          step = terminalStep;
-	          stopSimulator();
-	        } else {
-	          phase = simulatorMode === "replay" ? "update" : "process";
-	          step += 1;
-	        }
-	        execute_count = execute_count_max + 1;
-	      }
-	    }
-
-    // Filling in the action description.
-    if (execute_count == execute_count_max) {
-      for (let i=0; i<Object.keys(personas).length; i++) {
-        let curr_persona_name = Object.keys(personas)[i];
-        let curr_persona_name_os = curr_persona_name.replace(/ /g,"_");
-        let description_content = execute_movement["persona"][curr_persona_name]["description"];
-        let chatRaw = execute_movement["persona"][curr_persona_name]["chat"];
-
-        setText("current_action__"+curr_persona_name_os, description_content.split("@")[0]);
-        setText("target_address__"+curr_persona_name_os, description_content.split("@")[1]);
-        renderChat("chat__"+curr_persona_name_os, chatRaw);
-      }
-
-    }
-
-	    execute_count = execute_count - 1;
+		if (!motionStarted) {
+			movement_start = {};
+			for (const [name, sprite] of Object.entries(personas)) {
+				const record = execute_movement.persona[name];
+				movement_start[name] = [sprite.x, sprite.y];
+				movement_target[name] = [record.movement[0] * tile_width + 16, record.movement[1] * tile_width + 32];
+				const id = name.replace(/ /g, "_");
+				const [action, ...address] = record.description.split("@");
+				setText("current_action__" + id, action.trim() || "No activity reported for this step");
+				setText("target_address__" + id, formatDestination(address.join("@").trim()));
+				renderChat("chat__" + id, record.chat);
+				pronunciatios[name].setText(name.split(" ").map(part => part[0]).join("") + " " + record.pronunciatio);
+			}
+			setText("game-time-content", execute_movement.meta.curr_time);
+			motionStarted = true;
+		}
+		const reducedMotion = typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+		motionElapsed += Math.min(Math.max(delta || 0, 0), 100);
+		const progress = reducedMotion ? 1 : Math.min(motionElapsed / movementDuration, 1);
+		for (const [name, sprite] of Object.entries(personas)) {
+			const [fromX, fromY] = movement_start[name];
+			const [toX, toY] = movement_target[name];
+			sprite.setPosition(fromX + (toX - fromX) * progress, fromY + (toY - fromY) * progress);
+			const direction = toX > fromX ? "right" : toX < fromX ? "left" : toY > fromY ? "down" : toY < fromY ? "up" : null;
+			if (direction && progress < 1) sprite.anims.play(name + "-" + direction, true);
+			else {
+				sprite.anims.stop();
+				if (direction) sprite.setFrame(direction);
+			}
+			pronunciatios[name].setPosition(sprite.x, sprite.y - 54);
+		}
+		if (progress === 1) {
+			for (const name of Object.keys(personas)) {
+				logicalPositions[name] = [...execute_movement.persona[name].movement];
+				setText("position__" + name.replace(/ /g, "_"), logicalPositions[name].join(", "));
+			}
+			if (step === lastExecutableStep) {
+				step = terminalStep;
+				stopSimulator();
+			} else {
+				phase = simulatorMode === "replay" ? "update" : "process";
+				step += 1;
+				waitingSince = Date.now();
+				setStatus("Step " + (step - 1) + " complete · waiting for step " + step);
+			}
+		}
 	  }
 	}
 
