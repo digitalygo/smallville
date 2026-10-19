@@ -1,0 +1,56 @@
+.simulator-app { --ink:#19382f; --muted:#52675f; --line:#d6ded7; color:var(--ink); background:#f4f5ef; min-height:100vh; padding:0 32px 40px; font:15px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+.simulator-app *, .simulator-app *::before, .simulator-app *::after { box-sizing:border-box; }
+body { margin:0; }
+.simulator-app a { color:inherit; text-decoration:none; }
+.simulator-header { max-width:1600px; margin:auto; padding:24px 0; display:flex; justify-content:space-between; align-items:center; gap:16px; border-bottom:1px solid var(--line); }
+.town-brand { display:flex; align-items:center; gap:14px; font-size:24px; font-weight:750; letter-spacing:-1px; }
+.town-brand span { border-left:1px solid var(--line); padding-left:14px; font-size:12px; font-weight:500; letter-spacing:0; color:var(--muted); }
+.session-info { display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:12px; font-size:12px; overflow-wrap:anywhere; }
+.mode-label { background:#e0eadf; border-radius:5px; padding:5px 8px; font-weight:650; }
+.simulator-title { max-width:1600px; margin:30px auto 26px; display:flex; align-items:center; justify-content:space-between; gap:24px; }
+.simulator-app h1 { font:500 clamp(28px,3vw,40px)/1.12 Georgia,serif; letter-spacing:-1px; margin:8px 0 12px; }
+.simulator-title p { margin:0; color:var(--muted); }
+.simulator-title .eyebrow { font-size:11px; text-transform:uppercase; letter-spacing:1.5px; font-weight:650; }
+.clock { max-width:330px; text-align:right; font-variant-numeric:tabular-nums; }
+.clock span { display:block; color:var(--muted); font-size:12px; margin-bottom:5px; }
+.clock strong { font-size:16px; font-weight:600; }
+.simulator-layout { max-width:1600px; margin:auto; display:grid; grid-template-columns:minmax(0,1fr) 330px; align-items:start; gap:24px; }
+.map-panel { min-width:0; }
+.map-toolbar,.map-footer { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:14px 16px; background:white; border:1px solid var(--line); }
+.map-toolbar { border-radius:10px 10px 0 0; }
+.map-toolbar strong { display:block; font-size:14px; }
+#camera-status { display:block; color:var(--muted); font-size:12px; }
+.map-controls { display:flex; gap:6px; }
+.simulator-app button { font:600 12px/1.4 system-ui,sans-serif; color:var(--ink); background:#fff; border:1px solid #b8c8bd; border-radius:5px; padding:8px 11px; min-height:36px; cursor:pointer; }
+.simulator-app button:hover { background:#eaf0e8; }
+.simulator-app button:focus-visible,.simulator-app a:focus-visible,.simulator-app summary:focus-visible { outline:3px solid #38725c; outline-offset:3px; }
+#game-container { aspect-ratio:12/7; width:100%; overflow:hidden; background:#d7e5be; border-left:1px solid var(--line); border-right:1px solid var(--line); }
+#game-container canvas { display:block; }
+.map-footer { border-radius:0 0 10px 10px; color:var(--muted); font-size:11px; }
+.map-footer>div { display:flex; flex-shrink:0; gap:6px; }
+.runtime-status { display:flex; gap:8px; align-items:center; margin:16px 0 0; font-size:12px; }
+.runtime-status strong { font-weight:500; overflow-wrap:anywhere; }
+.status-marker { width:7px; height:7px; background:#47735b; border-radius:50%; flex-shrink:0; }
+.step-label { margin-left:auto; white-space:nowrap; color:var(--muted); font-variant-numeric:tabular-nums; }
+.planning-note { font-size:12px; color:var(--muted); max-width:65ch; margin:10px 0; }
+.residents-heading { display:flex; align-items:baseline; flex-wrap:wrap; justify-content:space-between; gap:8px; margin:0 0 14px; }
+.residents-heading h2 { margin:0; font-size:16px; font-weight:650; }
+.residents-heading>span { color:var(--muted); font-size:11px; }
+.resident-card { padding:16px; background:#fff; border:1px solid var(--line); border-radius:10px; margin:0 0 12px; overflow-wrap:anywhere; }
+.resident-heading { display:flex; align-items:center; gap:10px; }
+.resident-heading img { border-radius:7px; image-rendering:pixelated; background:#eff2e8; outline:1px solid rgb(0 0 0 / 10%); object-fit:contain; }
+.resident-heading>div { min-width:0; flex:1; }
+.resident-heading h3 { font-size:14px; font-weight:650; margin:0 0 3px; }
+.tile-position { color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; }
+.resident-card dl { margin:15px 0 10px; }
+.resident-card dt { text-transform:uppercase; letter-spacing:.8px; font-size:9px; color:var(--muted); font-weight:650; margin-top:12px; }
+.resident-card dd { margin:3px 0 0; font-size:13px; }
+.resident-card details { font-size:12px; padding:10px 0; border-top:1px solid #edf0ea; }
+.resident-card summary { cursor:pointer; }
+.resident-card details>div { padding-top:8px; color:var(--muted); }
+.resident-card .state-link { display:inline-block; color:#456352; font-size:11px; margin-top:4px; text-decoration:underline; text-underline-offset:3px; }
+@media (max-width:1050px) { .simulator-layout { grid-template-columns:minmax(0,1fr); } .residents-panel { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; } .residents-heading { grid-column:1/-1; margin-bottom:0; } .resident-heading { flex-wrap:wrap; } .resident-heading button { width:100%; } }
+@media (max-width:650px) { .simulator-app { padding:0 16px 24px; } .simulator-header { padding:18px 0; align-items:flex-start; } .town-brand { font-size:21px; } .town-brand span { display:none; } .session-info { max-width:50%; gap:4px; } .simulator-title { margin:24px 0 18px; display:block; } .clock { margin-top:18px; text-align:left; max-width:none; } .simulator-layout { gap:24px; } .residents-panel { grid-template-columns:1fr; } .resident-heading { flex-wrap:nowrap; } .resident-heading button { width:auto; } .map-toolbar,.map-footer { padding:10px; } .map-footer { align-items:flex-start; } .map-footer>span { max-width:55%; } .map-controls button { padding:7px 9px; } }
+.simulator-app button[aria-pressed="true"] { color:white; background:#285240; border-color:#285240; }
+#game-container { cursor:grab; }
+#game-container:active { cursor:grabbing; }

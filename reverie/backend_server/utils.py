@@ -24,9 +24,10 @@ for _p in _env_candidates:
 
 openai_api_key = os.getenv("OPENAI_API_KEY", "")
 openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "")
+hetzner_api_key = os.getenv("HETZNER_API_KEY", "")
 key_owner = os.getenv("KEY_OWNER", "anonymous")
 
-_VALID_PROVIDERS = frozenset({"openai", "openrouter"})
+_VALID_PROVIDERS = frozenset({"openai", "openrouter", "hetzner"})
 
 
 def _validate_provider(provider: str) -> None:
@@ -82,8 +83,53 @@ llm_persona_models: dict[str, str] = _load_json_map(
 )
 
 llm_embedding_model = os.getenv("LLM_EMBEDDING_MODEL", "").strip() or None
+llm_embedding_provider = os.getenv("LLM_EMBEDDING_PROVIDER", "").strip().lower() or None
+if llm_embedding_provider not in (None, "openai", "openrouter"):
+    raise ValueError("LLM_EMBEDDING_PROVIDER must be openai or openrouter.")
 llm_embedding_models: dict[str, str] = _load_json_map(
     os.getenv("LLM_EMBEDDING_MODELS", ""), "LLM_EMBEDDING_MODELS"
+)
+
+
+def _parse_embedding_dimensions(raw):
+    if not raw.strip():
+        return None
+    try:
+        dimensions = int(raw.strip())
+    except ValueError:
+        raise ValueError("LLM_EMBEDDING_DIMENSIONS must be a positive integer.") from None
+    if dimensions < 1:
+        raise ValueError("LLM_EMBEDDING_DIMENSIONS must be a positive integer.")
+    return dimensions
+
+
+def _parse_legacy_embedding_space(raw):
+    if not raw.strip():
+        return None
+    try:
+        space = json.loads(raw)
+        if not isinstance(space, dict) or set(space) != {
+            "provider", "model", "dimensions"
+        }:
+            raise ValueError
+        if (
+            space["provider"] not in ("openai", "openrouter")
+            or not isinstance(space["model"], str)
+            or not space["model"].strip()
+        ):
+            raise ValueError
+        if type(space["dimensions"]) is not int or space["dimensions"] < 1:
+            raise ValueError
+    except (ValueError, TypeError):
+        raise ValueError("LLM_LEGACY_EMBEDDING_SPACE must name a verified provider, model and positive integer dimensions.") from None
+    return space
+
+
+llm_embedding_dimensions = _parse_embedding_dimensions(
+    os.getenv("LLM_EMBEDDING_DIMENSIONS", "")
+)
+llm_legacy_embedding_space = _parse_legacy_embedding_space(
+    os.getenv("LLM_LEGACY_EMBEDDING_SPACE", "")
 )
 
 
@@ -217,6 +263,8 @@ def reasoning_effort_kwargs(provider: str, effort: str | None) -> dict[str, obje
     _validate_provider(provider)
     if not effort:
         return {}
+    if provider == "hetzner":
+        raise ValueError("LLM_REASONING_EFFORT is not supported for Hetzner; leave it unset.")
     if provider == "openrouter":
         return {"extra_body": {"reasoning": {"effort": effort}}}
     return {"reasoning_effort": effort}
@@ -238,6 +286,22 @@ env_visuals = os.path.join(maze_assets_loc, "the_ville", "visuals")
 
 fs_storage = os.path.join(_frontend_server_dir, "storage")
 fs_temp_storage = os.path.join(_frontend_server_dir, "temp_storage")
+
+
+def _parse_hetzner_rpm(raw):
+    try:
+        value = int(raw.strip()) if raw.strip() else 10
+    except ValueError:
+        raise ValueError("HETZNER_REQUESTS_PER_MINUTE must be an integer from 1 to 10.") from None
+    if not 1 <= value <= 10:
+        raise ValueError("HETZNER_REQUESTS_PER_MINUTE must be an integer from 1 to 10.")
+    return value
+
+
+hetzner_requests_per_minute = _parse_hetzner_rpm(os.getenv("HETZNER_REQUESTS_PER_MINUTE", ""))
+hetzner_rate_limit_dir = os.getenv(
+    "HETZNER_RATE_LIMIT_DIR", os.path.join(fs_storage, ".provider_limits")
+)
 
 collision_block_id = "32125"
 

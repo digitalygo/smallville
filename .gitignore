@@ -105,3 +105,6 @@ ENV/
 .ropeproject
 
 substrate/traces/status/
+
+# Local browser and verification output
+/docs/verification/

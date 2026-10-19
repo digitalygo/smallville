@@ -2,7 +2,7 @@
 Author: Joon Sung Park (joonspk@stanford.edu)
 
 File: gpt_structure.py
-Description: Wrapper functions for calling OpenAI / OpenRouter APIs.
+Description: Wrapper functions for calling OpenAI-compatible providers.
 """
 from __future__ import annotations
 
@@ -10,12 +10,28 @@ import json
 import os
 import random
 import time
+import threading
+from contextlib import nullcontext
 
 from openai import OpenAI
 
 from utils import *
+from provider_gate import SharedRequestGate, retry_after_seconds
+from embedding_space import EmbeddingIndex, EmbeddingSpaceError, validate_vector
 
 _clients: dict[str, OpenAI] = {}
+_activity_lock = threading.Lock()
+_activity = {"requests": 0, "state": "idle"}
+
+
+def request_activity():
+    with _activity_lock:
+        return dict(_activity)
+
+
+def _set_activity(**fields):
+    with _activity_lock:
+        _activity.update(fields, updated_at=time.time())
 
 
 def _get_client(provider: str) -> OpenAI:
@@ -24,7 +40,16 @@ def _get_client(provider: str) -> OpenAI:
     if provider in _clients:
         return _clients[provider]
 
-    if provider == "openrouter":
+    if provider == "hetzner":
+        if not hetzner_api_key.strip():
+            raise ValueError("HETZNER_API_KEY is required for Hetzner.")
+        client = OpenAI(
+            base_url="https://inference.hetzner.com/api/v1",
+            api_key=hetzner_api_key.strip(),
+            timeout=llm_api_timeout_seconds,
+            max_retries=0,
+        )
+    elif provider == "openrouter":
         client = OpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=openrouter_api_key,
@@ -51,9 +76,10 @@ def _get_client(provider: str) -> OpenAI:
 _DEFAULT_MODELS: dict[str, str] = {
     "openai": "gpt-4o",
     "openrouter": "openai/gpt-4o",
+    "hetzner": "Qwen3.8-27B",
 }
 
-_VALID_PROVIDERS = frozenset({"openai", "openrouter"})
+_VALID_PROVIDERS = frozenset({"openai", "openrouter", "hetzner"})
 
 
 def _validate_provider(provider: str) -> None:
@@ -90,7 +116,7 @@ def _resolve_model(persona=None, fallback_engine: str | None = None):
         name = getattr(persona.scratch, "name", None) if hasattr(persona, "scratch") else None
         if name and name in llm_persona_models:
             raw = llm_persona_models[name]
-            for known_prefix in ("openai:", "openrouter:"):
+            for known_prefix in ("openai:", "openrouter:", "hetzner:"):
                 if raw.startswith(known_prefix):
                     if not has_scratch_provider:
                         provider = known_prefix[:-1]
@@ -113,6 +139,32 @@ def temp_sleep(seconds=0.1):
     time.sleep(seconds)
 
 
+def _request_gate(provider):
+    if provider != "hetzner":
+        return nullcontext()
+    return SharedRequestGate(
+        hetzner_rate_limit_dir,
+        hetzner_api_key.strip(),
+        60 / hetzner_requests_per_minute + 0.1,
+    ).slot(on_wait=lambda seconds: _set_activity(state="queued", wait_seconds=round(seconds, 1)))
+
+
+def verify_hetzner_models(models):
+    def read_catalog():
+        catalog = _get_client("hetzner").models.list()
+        try:
+            available = {entry.id for entry in catalog.data}
+        except (AttributeError, TypeError):
+            raise _MalformedProviderResponse from None
+        if not all(isinstance(model, str) and model.strip() for model in available):
+            raise _MalformedProviderResponse
+        return available
+
+    available = _call_with_retries("hetzner", "models", read_catalog)
+    if not set(models) <= available:
+        raise ValueError("Configured Hetzner model is unavailable in the current catalog; no fallback is enabled.")
+
+
 def _call_with_retries(provider, operation, func):
     """Run ``func`` with bounded exponential retries.
 
@@ -128,13 +180,43 @@ def _call_with_retries(provider, operation, func):
     last_exception = None
     for attempt in range(total_attempts):
         try:
-            return func()
+            _set_activity(provider=provider, operation=operation, state="queued")
+            with _request_gate(provider):
+                with _activity_lock:
+                    _activity.update(
+                        provider=provider,
+                        operation=operation,
+                        state="requesting",
+                        requests=_activity["requests"] + 1,
+                        updated_at=time.time(),
+                    )
+                result = func()
+                _set_activity(state="idle", wait_seconds=0)
+                return result
         except (KeyboardInterrupt, SystemExit):
             raise
         except Exception as exc:
             last_exception = exc
+            _set_activity(state="retrying")
+            status = getattr(exc, "status_code", None)
+            if (
+                provider == "hetzner"
+                and status is not None
+                and 400 <= status < 500
+                and status not in (408, 429)
+            ):
+                total_attempts = attempt + 1
+                break
             if attempt < total_attempts - 1:
-                temp_sleep(llm_api_retry_base_seconds * (2 ** attempt))
+                delay = llm_api_retry_base_seconds * (2 ** attempt)
+                if provider == "hetzner":
+                    delay = max(
+                        min(delay, 60) + random.uniform(0, 0.25),
+                        retry_after_seconds(exc) or 0,
+                    )
+                    _set_activity(state="queued", wait_seconds=round(delay, 1))
+                temp_sleep(delay)
+    _set_activity(state="failed")
     raise LLMProviderError(
         provider=provider, operation=operation, attempts=total_attempts
     ) from last_exception
@@ -431,7 +513,42 @@ def _resolve_embedding_model(provider: str, explicit: str | None = None) -> str:
         return llm_embedding_models[provider]
     if llm_embedding_model:
         return llm_embedding_model
-    return _EMBEDDING_MODELS.get(provider, "text-embedding-ada-002")
+    return _EMBEDDING_MODELS[provider]
+
+
+def _resolve_embedding_provider(persona=None):
+    provider = llm_embedding_provider or _resolve_model(persona)[0]
+    if provider == "hetzner":
+        raise ValueError(
+            "Hetzner does not advertise embeddings. Explicitly configure "
+            "LLM_EMBEDDING_PROVIDER=openai or openrouter and its model/key; "
+            "no embedding fallback is enabled."
+        )
+    _validate_provider(provider)
+    return provider
+
+
+def _resolve_embedding_dimensions(provider, model):
+    dimensions = llm_embedding_dimensions
+    if provider == "openrouter" and model == "google/gemini-embedding-2":
+        dimensions = dimensions or 3072
+        if not 128 <= dimensions <= 3072:
+            raise ValueError("Gemini Embedding 2 requires 128 to 3072 output dimensions.")
+    return dimensions
+
+
+def bind_embedding_space(persona=None, model=None):
+    provider = _resolve_embedding_provider(persona)
+    model = _resolve_embedding_model(provider, explicit=model)
+    dimensions = _resolve_embedding_dimensions(provider, model)
+    index = getattr(getattr(persona, "a_mem", None), "embeddings", None)
+    if isinstance(index, EmbeddingIndex):
+        expected_dimensions = index.bind(
+            provider, model, dimensions, llm_legacy_embedding_space
+        )
+    else:
+        expected_dimensions = dimensions
+    return provider, model, dimensions, expected_dimensions, index
 
 
 def get_embedding(text, model=None, persona=None):
@@ -441,13 +558,16 @@ def get_embedding(text, model=None, persona=None):
     from per-provider ``LLM_EMBEDDING_MODELS``, then global
     ``LLM_EMBEDDING_MODEL``, then a provider-appropriate safe default
     (e.g. ``openai/text-embedding-ada-002`` for OpenRouter). The chat
-    model is never used for embeddings.
+    model is never used for embeddings. Gemini Embedding 2 uses explicit
+    dimensions (3072 by default). Persona cache provenance is checked before
+    dispatch; malformed or incompatible response vectors never reach memory.
     """
     text = text.replace("\n", " ")
     if not text:
         text = "this is blank"
-    provider, _ = _resolve_model(persona)
-    model = _resolve_embedding_model(provider, explicit=model)
+    provider, model, dimensions, expected_dimensions, index = bind_embedding_space(
+        persona, model
+    )
     client = _get_client(provider)
     kwargs: dict = {
         "input": [text],
@@ -455,12 +575,22 @@ def get_embedding(text, model=None, persona=None):
     }
     if provider == "openrouter":
         kwargs["encoding_format"] = "float"
-    response = _call_with_retries(
+    if dimensions is not None:
+        kwargs["dimensions"] = dimensions
+
+    def request_vector():
+        response = client.embeddings.create(**kwargs)
+        try:
+            return validate_vector(response.data[0].embedding, expected_dimensions)
+        except (AttributeError, IndexError, TypeError, EmbeddingSpaceError):
+            raise _MalformedProviderResponse from None
+
+    vector = _call_with_retries(
         provider,
         "embedding",
-        lambda: client.embeddings.create(**kwargs),
+        request_vector,
     )
-    return response.data[0].embedding
+    return index.observe(vector) if isinstance(index, EmbeddingIndex) else vector
 
 
 if __name__ == "__main__":

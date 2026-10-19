@@ -242,7 +242,8 @@ globalThis.simulatorHooks = {
   prepareLastExecutableMovement() {
     step = Number.MAX_SAFE_INTEGER - 1;
     phase = "execute";
-    execute_count = 0;
+    motionElapsed = 650;
+    motionStarted = false;
     movement_target = { Ada: [0, 0] };
     execute_movement = {
       meta: { curr_time: "12:00" },
@@ -257,12 +258,14 @@ globalThis.simulatorHooks = {
     };
     personas = {
       Ada: {
-        body: { x: 0, y: 0, position: { x: 0, y: 0 } },
+        x: 16, y: 32,
+        setPosition(x, y) { this.x = x; this.y = y; },
+        setFrame() {},
         anims: { play() {}, stop() {} },
         setTexture() {}
       }
     };
-    pronunciatios = { Ada: { x: 0, y: 0, setText() {} } };
+    pronunciatios = { Ada: { x: 0, y: 0, setText() {}, setPosition() {} } };
     cursors = {
       left: { isDown: false },
       right: { isDown: false },
@@ -271,8 +274,8 @@ globalThis.simulatorHooks = {
     };
     player = { body: { setVelocity() {} } };
   },
-  tick() {
-    update.call({ scene: { resume() {}, pause() {} } });
+  tick(delta=100) {
+    update.call({ scene: { resume() {}, pause() {} } }, 0, delta);
   },
   state() {
     return { step, phase, replayComplete };
@@ -356,3 +359,78 @@ if (!globalThis.gameConfig || !globalThis.gameConfig.fps || globalThis.gameConfi
 }
 """,
         )
+
+    def test_smooth_movement_commits_all_logical_tiles_once_before_next_post(self):
+        self.run_home_script_in_node("0", "simulate", "update", """
+(async () => {
+  simulatorHooks.prepareLastExecutableMovement();
+  step = 0;
+  phase = "update";
+  motionElapsed = 0;
+  logicalPositions = { Ada: [0,0], Grace: [2,0] };
+  personas.Grace = { ...personas.Ada, x:80, y:32 };
+  pronunciatios.Grace = { setText() {}, setPosition() {} };
+  let calls = [];
+  const ready = {"<step>":0, meta:{curr_time:"09:00:00"}, persona:{
+    Ada:{movement:[1,0],pronunciatio:"walk",description:"walking @ cafe",chat:null},
+    Grace:{movement:[2,0],pronunciatio:"read",description:"reading @ home",chat:null}
+  }};
+  globalThis.fetch = async (url, options) => {
+    calls.push(JSON.parse(options.body));
+    return {ok:true,status:200,json:async()=>ready};
+  };
+  await pollMovement(0);
+  if (phase !== "execute") throw new Error("ready movement was not accepted");
+  simulatorHooks.tick(50);
+  if (personas.Ada.x <= 16 || personas.Ada.x >= 48) throw new Error("motion did not interpolate");
+  if (logicalPositions.Ada[0] !== 0 || step !== 0) throw new Error("logical step committed before motion completed");
+  paused = true;
+  const frozen = personas.Ada.x;
+  simulatorHooks.tick(100);
+  if (personas.Ada.x !== frozen) throw new Error("pause did not stop motion");
+  paused = false;
+  for (let i=0;i<12;i++) simulatorHooks.tick(50);
+  if (step !== 1 || phase !== "process") throw new Error("multi-resident step did not commit exactly once");
+  if (logicalPositions.Ada[0] !== 1 || logicalPositions.Grace[0] !== 2) throw new Error("logical tiles were not committed");
+  if (personas.Ada.x !== 48 || personas.Grace.x !== 80) throw new Error("sprite endpoints drifted");
+  simulatorHooks.tick(16);
+  await new Promise(resolve=>setImmediate(resolve));
+  const posted = calls.at(-1);
+  if (posted.step !== 1 || posted.environment.Ada.x !== 1 || posted.environment.Grace.x !== 2) throw new Error("next environment did not use committed logical tiles");
+  if (phase !== "update") throw new Error("environment acknowledgement did not advance phase");
+})().catch(error=>{ console.error(error); process.exitCode=1; });
+""")
+
+    def test_pending_and_wrong_step_do_not_change_positions_or_execute(self):
+        self.run_home_script_in_node("0", "simulate", "update", """
+(async () => {
+  simulatorHooks.prepareLastExecutableMovement();
+  step = 0; phase = "update";
+  const initialX = personas.Ada.x;
+  globalThis.fetch = async () => ({ok:true,status:202,json:async()=>({status:"pending"})});
+  await pollMovement(0);
+  if (phase !== "update" || step !== 0 || personas.Ada.x !== initialX) throw new Error("pending response advanced the simulation");
+  globalThis.fetch = async () => ({ok:true,status:200,json:async()=>({"<step>":1,meta:{curr_time:"09:00"},persona:{Ada:{movement:[1,0],pronunciatio:"",description:"walk",chat:null}}})});
+  await pollMovement(0);
+  if (phase !== "update" || step !== 0 || personas.Ada.x !== initialX) throw new Error("wrong-step movement was accepted");
+})().catch(error=>{ console.error(error); process.exitCode=1; });
+""")
+
+    def test_reduced_motion_commits_the_same_step_without_interpolation(self):
+        self.run_home_script_in_node("0", "replay", "update", """
+simulatorHooks.prepareLastExecutableMovement();
+step=0; motionElapsed=0;
+execute_movement.persona.Ada.movement=[1,0];
+window.matchMedia=()=>({matches:true});
+simulatorHooks.tick(16);
+if (step !== 1 || phase !== "update" || logicalPositions.Ada[0] !== 1 || personas.Ada.x !== 48) throw new Error("reduced motion changed the logical result");
+""")
+
+    def test_expired_session_stops_without_committing_a_step(self):
+        self.run_home_script_in_node("0", "simulate", "update", """
+(async () => {
+  globalThis.fetch=async()=>({ok:false,status:403});
+  await pollMovement(0);
+  if (phase !== "complete" || step !== 0 || !statusMessage.includes("sign in")) throw new Error("expired session did not stop with recovery guidance");
+})().catch(error=>{ console.error(error); process.exitCode=1; });
+""")
