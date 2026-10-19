@@ -91,6 +91,48 @@ llm_embedding_models: dict[str, str] = _load_json_map(
 )
 
 
+def _parse_embedding_dimensions(raw):
+    if not raw.strip():
+        return None
+    try:
+        dimensions = int(raw.strip())
+    except ValueError:
+        raise ValueError("LLM_EMBEDDING_DIMENSIONS must be a positive integer.") from None
+    if dimensions < 1:
+        raise ValueError("LLM_EMBEDDING_DIMENSIONS must be a positive integer.")
+    return dimensions
+
+
+def _parse_legacy_embedding_space(raw):
+    if not raw.strip():
+        return None
+    try:
+        space = json.loads(raw)
+        if not isinstance(space, dict) or set(space) != {
+            "provider", "model", "dimensions"
+        }:
+            raise ValueError
+        if (
+            space["provider"] not in ("openai", "openrouter")
+            or not isinstance(space["model"], str)
+            or not space["model"].strip()
+        ):
+            raise ValueError
+        if type(space["dimensions"]) is not int or space["dimensions"] < 1:
+            raise ValueError
+    except (ValueError, TypeError):
+        raise ValueError("LLM_LEGACY_EMBEDDING_SPACE must name a verified provider, model and positive integer dimensions.") from None
+    return space
+
+
+llm_embedding_dimensions = _parse_embedding_dimensions(
+    os.getenv("LLM_EMBEDDING_DIMENSIONS", "")
+)
+llm_legacy_embedding_space = _parse_legacy_embedding_space(
+    os.getenv("LLM_LEGACY_EMBEDDING_SPACE", "")
+)
+
+
 class LLMProviderError(Exception):
     """Raised when an LLM provider call fails after bounded retries.
 

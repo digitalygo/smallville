@@ -17,6 +17,7 @@ from openai import OpenAI
 
 from utils import *
 from provider_gate import SharedRequestGate, retry_after_seconds
+from embedding_space import EmbeddingIndex, EmbeddingSpaceError, validate_vector
 
 _clients: dict[str, OpenAI] = {}
 _activity_lock = threading.Lock()
@@ -527,6 +528,29 @@ def _resolve_embedding_provider(persona=None):
     return provider
 
 
+def _resolve_embedding_dimensions(provider, model):
+    dimensions = llm_embedding_dimensions
+    if provider == "openrouter" and model == "google/gemini-embedding-2":
+        dimensions = dimensions or 3072
+        if not 128 <= dimensions <= 3072:
+            raise ValueError("Gemini Embedding 2 requires 128 to 3072 output dimensions.")
+    return dimensions
+
+
+def bind_embedding_space(persona=None, model=None):
+    provider = _resolve_embedding_provider(persona)
+    model = _resolve_embedding_model(provider, explicit=model)
+    dimensions = _resolve_embedding_dimensions(provider, model)
+    index = getattr(getattr(persona, "a_mem", None), "embeddings", None)
+    if isinstance(index, EmbeddingIndex):
+        expected_dimensions = index.bind(
+            provider, model, dimensions, llm_legacy_embedding_space
+        )
+    else:
+        expected_dimensions = dimensions
+    return provider, model, dimensions, expected_dimensions, index
+
+
 def get_embedding(text, model=None, persona=None):
     """Return embedding vector for ``text``.
 
@@ -534,13 +558,16 @@ def get_embedding(text, model=None, persona=None):
     from per-provider ``LLM_EMBEDDING_MODELS``, then global
     ``LLM_EMBEDDING_MODEL``, then a provider-appropriate safe default
     (e.g. ``openai/text-embedding-ada-002`` for OpenRouter). The chat
-    model is never used for embeddings.
+    model is never used for embeddings. Gemini Embedding 2 uses explicit
+    dimensions (3072 by default). Persona cache provenance is checked before
+    dispatch; malformed or incompatible response vectors never reach memory.
     """
     text = text.replace("\n", " ")
     if not text:
         text = "this is blank"
-    provider = _resolve_embedding_provider(persona)
-    model = _resolve_embedding_model(provider, explicit=model)
+    provider, model, dimensions, expected_dimensions, index = bind_embedding_space(
+        persona, model
+    )
     client = _get_client(provider)
     kwargs: dict = {
         "input": [text],
@@ -548,12 +575,22 @@ def get_embedding(text, model=None, persona=None):
     }
     if provider == "openrouter":
         kwargs["encoding_format"] = "float"
-    response = _call_with_retries(
+    if dimensions is not None:
+        kwargs["dimensions"] = dimensions
+
+    def request_vector():
+        response = client.embeddings.create(**kwargs)
+        try:
+            return validate_vector(response.data[0].embedding, expected_dimensions)
+        except (AttributeError, IndexError, TypeError, EmbeddingSpaceError):
+            raise _MalformedProviderResponse from None
+
+    vector = _call_with_retries(
         provider,
         "embedding",
-        lambda: client.embeddings.create(**kwargs),
+        request_vector,
     )
-    return response.data[0].embedding
+    return index.observe(vector) if isinstance(index, EmbeddingIndex) else vector
 
 
 if __name__ == "__main__":

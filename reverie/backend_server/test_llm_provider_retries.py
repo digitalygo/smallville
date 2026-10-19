@@ -160,7 +160,7 @@ class _FlakyEmbeddings:
         self.kwargs_list.append(kwargs)
         if self.calls <= self.failures:
             raise self.exc
-        return _FakeEmbeddingResponse([0.1, 0.2, 0.3])
+        return _FakeEmbeddingResponse([0.1] * kwargs["dimensions"] if "dimensions" in kwargs else [0.1, 0.2, 0.3])
 
 
 class _FakeClient:
@@ -457,13 +457,14 @@ class EmbeddingRetryTests(_RetryHarness):
             llm_embedding_models={"openrouter": "google/gemini-embedding-2"},
         ):
             vec = gpt_structure.get_embedding("Gemini retry text")
-        self.assertEqual(vec, [0.1, 0.2, 0.3])
+        self.assertEqual(vec, [0.1] * 3072)
         self.assertEqual(flaky.calls, 3)
         self.assertEqual(self._sleep_delays(), [1.0, 2.0])
         for kwargs in flaky.kwargs_list:
             self.assertEqual(kwargs["model"], "google/gemini-embedding-2")
             self.assertEqual(kwargs["input"], ["Gemini retry text"])
             self.assertEqual(kwargs["encoding_format"], "float")
+            self.assertEqual(kwargs["dimensions"], 3072)
 
 
 class SafeWrapperProviderFailureTests(_RetryHarness):

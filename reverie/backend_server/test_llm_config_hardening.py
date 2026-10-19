@@ -101,7 +101,7 @@ class _FakeEmbeddings:
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
-        return _FakeEmbeddingResponse([0.1, 0.2, 0.3])
+        return _FakeEmbeddingResponse([0.1] * kwargs.get("dimensions", 3))
 
 
 class _FakeClient:
@@ -313,6 +313,7 @@ class EmbeddingRequestContractTests(unittest.TestCase):
             call,
             {
                 "model": "google/gemini-embedding-2",
+                "dimensions": 3072,
                 "input": ["Complete Gemini text with newline"],
                 "encoding_format": "float",
             },

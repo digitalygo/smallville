@@ -159,7 +159,10 @@ def _split_path_for_read(path):
     return root, components
 
 
-def read_json_checked(path):
+_MISSING_DEFAULT = object()
+
+
+def read_json_checked(path, *, missing_default=_MISSING_DEFAULT):
     """Read UTF-8 JSON from ``path`` through descriptor-relative traversal.
 
     The path is split into safe single components and read through
@@ -174,6 +177,9 @@ def read_json_checked(path):
     every exit path, including parse failures. Raises ``OSError`` for
     unopenable or non-regular paths and ``ValueError`` for malformed JSON or
     unsafe components, with the offending path in the message.
+    When ``missing_default`` is supplied, return it only for genuine
+    FileNotFoundError; JSON null, corrupt files, symlinks and special files
+    remain distinguishable from an absent optional file.
     """
     root, components = _split_path_for_read(path)
     if not components:
@@ -181,6 +187,8 @@ def read_json_checked(path):
     try:
         return read_json_beneath(root, components)
     except OSError as exc:
+        if isinstance(exc, FileNotFoundError) and missing_default is not _MISSING_DEFAULT:
+            return missing_default
         if str(exc).startswith("Refusing to read "):
             raise OSError(
                 f"Refusing to read '{path}': not a regular file."

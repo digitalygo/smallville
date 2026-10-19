@@ -15,6 +15,7 @@ import os
 
 from global_methods import *
 from durability import atomic_write_json, read_json_checked
+from embedding_space import EmbeddingIndex
 
 
 class ConceptNode: 
@@ -63,7 +64,7 @@ class AssociativeMemory:
     self.kw_strength_event = dict()
     self.kw_strength_thought = dict()
 
-    self.embeddings = read_json_checked(f_saved + "/embeddings.json")
+    self.embeddings = EmbeddingIndex.load(f_saved)
 
     nodes_load = read_json_checked(f_saved + "/nodes.json")
     for count in range(len(nodes_load.keys())): 
@@ -111,6 +112,7 @@ class AssociativeMemory:
 
     
   def save(self, out_json): 
+    self.embeddings.check_save_destination(out_json)
     r = dict()
     for count in range(len(self.id_to_node.keys()), 0, -1): 
       node_id = f"node_{str(count)}"
@@ -147,11 +149,14 @@ class AssociativeMemory:
     atomic_write_json(out_json + "/kw_strength.json", r, indent=None)
 
     atomic_write_json(out_json + "/embeddings.json", self.embeddings, indent=None)
+    if self.embeddings.space is not None:
+      atomic_write_json(out_json + "/embedding_space.json", self.embeddings.space, indent=None)
 
 
   def add_event(self, created, expiration, s, p, o, 
                       description, keywords, poignancy, 
                       embedding_pair, filling):
+    embedding_pair = self.embeddings.prepare_pair(embedding_pair)
     # Setting up the node ID and counts.
     node_count = len(self.id_to_node.keys()) + 1
     type_count = len(self.seq_event) + 1
@@ -198,6 +203,7 @@ class AssociativeMemory:
   def add_thought(self, created, expiration, s, p, o, 
                         description, keywords, poignancy, 
                         embedding_pair, filling):
+    embedding_pair = self.embeddings.prepare_pair(embedding_pair)
     # Setting up the node ID and counts.
     node_count = len(self.id_to_node.keys()) + 1
     type_count = len(self.seq_thought) + 1
@@ -242,6 +248,7 @@ class AssociativeMemory:
   def add_chat(self, created, expiration, s, p, o, 
                      description, keywords, poignancy, 
                      embedding_pair, filling): 
+    embedding_pair = self.embeddings.prepare_pair(embedding_pair)
     # Setting up the node ID and counts.
     node_count = len(self.id_to_node.keys()) + 1
     type_count = len(self.seq_chat) + 1

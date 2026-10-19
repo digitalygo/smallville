@@ -172,7 +172,7 @@
 			}
 			const status = await response.json();
 			const activity = status.provider_activity || {};
-			setText("provider-progress", "Backend connected · " + (activity.provider ? activity.provider + " " + (activity.operation || "") + " · " + activity.state + " · " + (activity.requests || 0) + " requests attempted" : "waiting for environment"));
+			setText("provider-progress", "Backend connected · " + (activity.provider ? activity.provider + " " + (activity.operation || "") + " · " + activity.state + " · " + (activity.requests || 0) + " total attempts across providers" : "waiting for environment"));
 		} catch {
 			setText("provider-progress", "Backend status connection interrupted · retrying");
 		} finally {

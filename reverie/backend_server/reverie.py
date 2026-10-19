@@ -2308,6 +2308,9 @@ def _validate_provider_keys(personas):
             providers.add(gpt_structure._resolve_embedding_provider(persona))
             reasoning_effort_kwargs(provider, llm_reasoning_effort)
 
+    for persona in personas.values():
+        gpt_structure.bind_embedding_space(persona)
+
     missing = sorted(p for p in providers if not _provider_key(p))
     if missing:
         raise ValueError(

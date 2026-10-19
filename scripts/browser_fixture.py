@@ -80,6 +80,7 @@ def main():
         stop = threading.Event()
         backend_errors = []
         request_starts = []
+        embedding_requests = []
 
         def fake_completion(**kwargs):
             request_starts.append(time.time())
@@ -102,9 +103,19 @@ def main():
             models=SimpleNamespace(list=fake_catalog),
         )
 
+        def fake_embedding(**kwargs):
+            assert kwargs["model"] == "google/gemini-embedding-2"
+            assert kwargs["dimensions"] == 3072 and kwargs["encoding_format"] == "float"
+            embedding_requests.append(time.time())
+            return SimpleNamespace(data=[SimpleNamespace(embedding=[0.01] * 3072)])
+
+        embedding_client = SimpleNamespace(
+            embeddings=SimpleNamespace(create=fake_embedding)
+        )
+
         def fixture_client(provider):
-            assert provider == "hetzner", "Unexpected provider fallback"
-            return fake_client
+            assert provider in ("hetzner", "openrouter"), "Unexpected provider fallback"
+            return fake_client if provider == "hetzner" else embedding_client
 
         def synthetic_plan(persona, maze, personas, new_day, retrieved):
             x, y = persona.scratch.curr_tile
@@ -120,6 +131,29 @@ def main():
                 ),
                 (x, y),
             )
+            memory_key = "Synthetic fixture resident walking through a village"
+            if memory_key not in persona.a_mem.embeddings:
+                vector = gpt.get_embedding(memory_key, persona=persona)
+                persona.a_mem.add_event(
+                    persona.scratch.curr_time,
+                    None,
+                    "Synthetic resident",
+                    "is",
+                    "walking",
+                    memory_key,
+                    {"walking"},
+                    1,
+                    (memory_key, vector),
+                    None,
+                )
+            from persona.cognitive_modules.retrieve import extract_relevance
+
+            relevance = extract_relevance(
+                persona,
+                persona.a_mem.seq_event,
+                "Synthetic fixture resident destination",
+            )
+            assert all(0.99 <= score <= 1.01 for score in relevance.values())
             plan = gpt.ChatGPT_request(
                 json.dumps({"resident": "synthetic", "destination": target}),
                 persona=persona,
@@ -150,6 +184,11 @@ def main():
                 (gpt, "llm_model", "Qwen3.8-27B"),
                 (gpt, "llm_persona_models", {}),
                 (gpt, "llm_reasoning_effort", None),
+                (gpt, "llm_embedding_provider", "openrouter"),
+                (gpt, "llm_embedding_model", "google/gemini-embedding-2"),
+                (gpt, "llm_embedding_models", {}),
+                (gpt, "llm_embedding_dimensions", 3072),
+                (gpt, "llm_legacy_embedding_space", None),
                 (gpt, "hetzner_api_key", "synthetic-browser-only"),
                 (gpt, "hetzner_rate_limit_dir", str(work / "limits")),
                 (gpt, "hetzner_requests_per_minute", 10),
@@ -159,6 +198,8 @@ def main():
             server = reverie.ReverieServer(origin, "browser-smoke")
             server.server_sleep = 0.02
             gpt.verify_hetzner_models({"Qwen3.8-27B"})
+            for persona in server.personas.values():
+                gpt.bind_embedding_space(persona)
             server.publish_runtime_markers()
 
             def run_backend():
@@ -225,16 +266,33 @@ def main():
                 ),
                 "provider_activity": gpt.request_activity(),
                 "provider_network_used": False,
+                "hetzner_attempts": len(request_starts),
+                "openrouter_embedding_attempts": len(embedding_requests),
+                "embedding_dimensions": 3072,
+                "embedding_space": next(
+                    iter(server.personas.values())
+                ).a_mem.embeddings.space,
                 "minimum_request_spacing_seconds": min(
                     b - a for a, b in pairwise(request_starts)
                 ),
                 "request_starts": request_starts,
             }
+            resumed = reverie.ReverieServer(None, "browser-smoke", resume=True)
+            for persona in resumed.personas.values():
+                gpt.bind_embedding_space(persona)
+                assert (
+                    persona.a_mem.embeddings.space["model"]
+                    == "google/gemini-embedding-2"
+                )
+                assert persona.a_mem.embeddings.space["dimensions"] == 3072
+                assert persona.a_mem.embeddings
+            report["checkpoint_resume_verified"] = True
+            report["provider_mode"] = "mocked_chat_and_embeddings"
+            assert server.step >= 2, report
+            assert report["minimum_request_spacing_seconds"] >= 6.1, report
             (screenshots / "browser-backend-evidence.json").write_text(
                 json.dumps(report, indent=2) + "\n"
             )
-            assert server.step >= 2, report
-            assert report["minimum_request_spacing_seconds"] >= 6.1, report
             print(json.dumps(report))
 
 
